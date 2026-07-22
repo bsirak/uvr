@@ -142,9 +142,10 @@ pub struct DownloadSpec<'a> {
     /// source. None = use the client's default UA.
     pub user_agent: Option<&'a str>,
     /// Optional `Authorization` header value (e.g. `"token <forgejo>"` or
-    /// `"Bearer <github>"`). Forwarded to the primary URL only. Fallback
-    /// URLs (CRAN Archive, P3M → source) deliberately drop the header —
-    /// the token is registry-scoped and shouldn't leak to other hosts.
+    /// `"Bearer <github/gitlab>"`). Forwarded to the primary URL only.
+    /// Fallback URLs (CRAN Archive, P3M → source) deliberately drop the
+    /// header — the token is registry-scoped and shouldn't leak to other
+    /// hosts.
     pub auth_header: Option<&'a str>,
 }
 

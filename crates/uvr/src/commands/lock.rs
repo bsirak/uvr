@@ -10,6 +10,7 @@ use uvr_core::registry::bioconductor::BiocRegistry;
 use uvr_core::registry::cran::CranRegistry;
 use uvr_core::registry::forgejo::{parse_forgejo_spec, resolve_forgejo_package_with_remotes};
 use uvr_core::registry::github::{parse_github_spec, resolve_github_package_with_remotes};
+use uvr_core::registry::gitlab::{parse_gitlab_spec, resolve_gitlab_package_with_remotes};
 use uvr_core::registry::{PackageInfo, RegistryChain};
 use uvr_core::resolver::{PackageRegistry, Resolver};
 
@@ -248,28 +249,32 @@ fn load_existing_lockfile(project: &Project) -> Option<Lockfile> {
 enum GitKind {
     GitHub,
     Forgejo,
+    Gitlab,
 }
 
 fn classify_git(git: &str) -> GitKind {
     if git.starts_with("forgejo::") {
         GitKind::Forgejo
+    } else if git.starts_with("gitlab::") {
+        GitKind::Gitlab
     } else {
         GitKind::GitHub
     }
 }
 
-/// Collect all git package (github or forgejo) dependencies from the manifest,
-/// resolve them via the respective API, and recursively walk any `Remotes:`
-/// declared in their DESCRIPTIONs. Returns a map from package name →
-/// PackageInfo that the resolver can inject without going through the registry
-/// chain (#84).
+/// Collect all git package (github, forgejo, or gitlab) dependencies from the
+/// manifest, resolve them via the respective API, and recursively walk any
+/// `Remotes:` declared in their DESCRIPTIONs. Returns a map from package
+/// name → PackageInfo that the resolver can inject without going through the
+/// registry chain (#84).
 ///
 /// BFS: seed the queue from manifest direct + dev git deps, pop one,
-/// dispatch to github or forgejo resolver based on the `forgejo::` prefix
-/// (which also returns its `Remotes:` chain), and push each unseen remote
-/// back onto the queue. Dedupe on `"user/repo@ref"` (github) or
-/// `"forgejo::host/owner/repo@ref"` (forgejo) so a diamond doesn't cause
-/// two HTTP fetches.
+/// dispatch to github, forgejo, or gitlab resolver based on the `forgejo::`
+/// / `gitlab::` prefix (which also returns its `Remotes:` chain), and push
+/// each unseen remote back onto the queue. Dedupe on `"user/repo@ref"`
+/// (github), `"forgejo::host/owner/repo@ref"` (forgejo), or
+/// `"gitlab::host/group/.../project@ref"` (gitlab) so a diamond doesn't
+/// cause two HTTP fetches.
 ///
 /// **Failure policy.** Manifest-direct specs hard-error on any git package
 /// failure — those are user-declared deps and silent skips would let
@@ -324,13 +329,14 @@ async fn resolve_git_deps(
         }
         let is_direct = direct_specs.contains(&spec);
 
-        // GithubRemote and ForgejoRemote are both aliases for
+        // GithubRemote, ForgejoRemote, and GitlabRemote are all aliases for
         // `(String, String, Option<String>)`, so this match unifies into a
         // single `Result<(PackageInfo, Vec<(String, String, Option<String>)>), UvrError>`.
         // The middle string carries the canonical next-hop spec for each
         // registry: `"user/repo"` for github, `"forgejo::host/owner/repo"`
-        // for forgejo, so the BFS classifier on the next pop works
-        // correctly with no further rewriting.
+        // for forgejo, `"gitlab::host/group/.../project"` for gitlab, so the
+        // BFS classifier on the next pop works correctly with no further
+        // rewriting.
         let resolved = match classify_git(&spec) {
             GitKind::Forgejo => {
                 let body = spec.strip_prefix("forgejo::").unwrap_or(&spec);
@@ -338,6 +344,13 @@ async fn resolve_git_deps(
                     continue;
                 };
                 resolve_forgejo_package_with_remotes(client, &host, &owner, &repo, &git_ref).await
+            }
+            GitKind::Gitlab => {
+                let body = spec.strip_prefix("gitlab::").unwrap_or(&spec);
+                let Some((host, project_path, git_ref)) = parse_gitlab_spec(body) else {
+                    continue;
+                };
+                resolve_gitlab_package_with_remotes(client, &host, &project_path, &git_ref).await
             }
             GitKind::GitHub => {
                 let Some((user, repo, git_ref)) = parse_github_spec(&spec) else {
@@ -362,8 +375,9 @@ async fn resolve_git_deps(
 
         // Dedup on the *resolved package name*, not the spec string. The same
         // package can be reachable via two different specs (e.g. a github
-        // transitive at v1 and a forgejo transitive at v2 of the same package);
-        // both have distinct spec strings so visited_specs lets both through.
+        // transitive at v1 and a forgejo or gitlab transitive at v2 of the
+        // same package); both have distinct spec strings so visited_specs
+        // lets both through.
         // An identical re-resolution (same version + checksum + url) is a benign
         // diamond and keeps the first. A genuine divergence is a real ambiguity
         // whose winner would otherwise depend on BFS arrival order — surface it
@@ -400,6 +414,7 @@ async fn resolve_git_deps(
             // `repo_path` is already in canonical form:
             //   github  → "user/repo"
             //   forgejo → "forgejo::host/owner/repo"
+            //   gitlab  → "gitlab::host/group/.../project"
             // so we don't need to re-prefix.
             let next_spec = match rev {
                 Some(r) => format!("{repo_path}@{r}"),
@@ -425,6 +440,10 @@ mod tests {
         assert_eq!(
             classify_git("forgejo::codefloe.com/pat-s/mypkg"),
             GitKind::Forgejo
+        );
+        assert_eq!(
+            classify_git("gitlab::gitlab.com/my-group/mypkg"),
+            GitKind::Gitlab
         );
     }
 }
