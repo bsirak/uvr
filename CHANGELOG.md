@@ -7,6 +7,15 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.4.3 (2026-07-27)
+
+Small, focused batch: `uvr sync` finally delivers on the library-pruning
+promise `uvr remove` has printed since inception (found by the new uvr-r
+companion test suite), R detection is hardened against enclosing R
+sessions, and sync got faster by one R spawn. The pruning change passed
+an adversarial review that narrowed it to exactly the safe cases before
+tagging.
+
 ### Fixes
 
 - `uvr sync` now actually removes unused packages from the library, as
