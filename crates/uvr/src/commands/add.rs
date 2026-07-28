@@ -502,11 +502,7 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
                 continue;
             }
             let host = parts[0];
-            // Project-path segments are already restricted to
-            // `[alnum].-_` by `parse_gitlab_parts`, so the only character
-            // that needs escaping to build GitLab's `:id` path parameter
-            // is the `/` separator between segments.
-            let project_id = parts[1..].join("%2F");
+            let project_id = urlencoding::encode(&parts[1..].join("/")).into_owned();
             let url = format!(
                 "https://{host}/api/v4/projects/{project_id}/repository/files/DESCRIPTION/raw?ref={r}",
                 r = git_ref_owned,

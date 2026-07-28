@@ -454,7 +454,10 @@ mod tests {
         // Regression: R CMD INSTALL splits progress and the actual `Error
         // in ... :` cause across stdout/stderr inconsistently — dropping
         // either one can hide why lazy loading failed.
-        let log = combine_logs("** byte-compile...\nERROR: lazy loading failed", "Error in loadNamespace(x) : there is no package called 'foo'");
+        let log = combine_logs(
+            "** byte-compile...\nERROR: lazy loading failed",
+            "Error in loadNamespace(x) : there is no package called 'foo'",
+        );
         assert!(log.contains("ERROR: lazy loading failed"));
         assert!(log.contains("there is no package called 'foo'"));
     }

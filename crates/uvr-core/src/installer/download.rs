@@ -569,9 +569,13 @@ mod tests {
     fn cache_filename_strips_query_string() {
         // GitLab archive URLs carry `?sha=...` in the final path segment;
         // `?` is illegal in Windows filenames (os error 123) if left in.
-        let url = "https://gitlab.example.com/api/v4/projects/42/repository/archive.tar.gz?sha=abc123";
+        let url =
+            "https://gitlab.example.com/api/v4/projects/42/repository/archive.tar.gz?sha=abc123";
         let name = cache_filename(url, None, "mypkg_0.1.0.tar.gz");
-        assert!(!name.contains('?'), "cache filename must not contain '?': {name}");
+        assert!(
+            !name.contains('?'),
+            "cache filename must not contain '?': {name}"
+        );
         assert!(name.ends_with("-archive.tar.gz"));
     }
 
