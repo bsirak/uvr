@@ -893,18 +893,21 @@ async fn install_from_lockfile_with_r(
     let mut runtime_source = 0usize;
 
     if !plans.is_empty() {
-        // Forgejo tarballs (the lockfile `url` field for forgejo sources)
-        // require the registry-scoped token to download from private repos.
-        // The lock phase already attaches it to API calls; sync needs to
-        // attach it to the archive download too. github tarballs go through
-        // api.github.com which works unauthenticated for public repos and
-        // GitHub doesn't accept the same env-var convention here — no auth
-        // forwarding needed.
+        // Forgejo/GitLab tarballs (the lockfile `url` field for those
+        // sources) require the registry-scoped token to download from
+        // private repos/projects. The lock phase already attaches it to
+        // API calls; sync needs to attach it to the archive download too.
+        // github tarballs go through api.github.com which works
+        // unauthenticated for public repos and GitHub doesn't accept the
+        // same env-var convention here — no auth forwarding needed.
         let auth_headers: Vec<Option<String>> = plans
             .iter()
             .map(|p| match &p.pkg.source {
                 uvr_core::lockfile::PackageSource::Forgejo { host } => {
                     uvr_core::registry::forgejo::forgejo_token(host).map(|t| format!("token {t}"))
+                }
+                uvr_core::lockfile::PackageSource::Gitlab { host } => {
+                    uvr_core::registry::gitlab::gitlab_token(host).map(|t| format!("Bearer {t}"))
                 }
                 _ => None,
             })
@@ -1627,15 +1630,16 @@ fn source_url(pkg: &LockedPackage, bioc_release: Option<&str>) -> String {
                 pkg.name, ver
             )
         }
-        // Forgejo, GitHub, and Local always have `url` populated by the
-        // resolver (or are file:// paths handled elsewhere); the
+        // Forgejo, GitLab, GitHub, and Local always have `url` populated by
+        // the resolver (or are file:// paths handled elsewhere); the
         // `if let Some(url) ...` guard at the top of this function takes
         // the URL straight from `pkg.url`. If we reach this arm with no
         // URL, something earlier mis-resolved; return empty and let the
         // sync surface a clear download error.
-        PackageSource::Forgejo { .. } | PackageSource::GitHub | PackageSource::Local => {
-            String::new()
-        }
+        PackageSource::Forgejo { .. }
+        | PackageSource::Gitlab { .. }
+        | PackageSource::GitHub
+        | PackageSource::Local => String::new(),
         PackageSource::Custom { .. } => {
             // Custom repo packages should always have a stored URL from resolution.
             // Fall back to empty if somehow missing.

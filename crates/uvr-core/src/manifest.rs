@@ -317,20 +317,22 @@ fn resolve_remote_pkg_name(
 
 /// Parse an R `Remotes:` field into `(package_name, DependencySpec)` pairs.
 ///
-/// Supports devtools/remotes-style GitHub entries plus uvr's `forgejo::`:
+/// Supports devtools/remotes-style GitHub entries plus uvr's `forgejo::`
+/// and `gitlab::`:
 /// - `user/repo` → `git = "user/repo"`
 /// - `user/repo@ref` → `git = "user/repo", rev = "ref"`
 /// - `github::user/repo[@ref]` → same (explicit prefix)
 /// - `pkgname=user/repo[@ref]` → explicit package name binding
 /// - `forgejo::host/owner/repo[@ref]` → `git = "forgejo::host/owner/repo", rev = "ref"`
+/// - `gitlab::host/group/.../project[@ref]` → `git = "gitlab::host/group/.../project", rev = "ref"`
 ///
-/// Entries with other prefixes (`gitlab::`, `bitbucket::`, `git::`,
-/// `url::`, `local::`, `bioc::`) are skipped for now — the caller keeps
-/// whatever version-based spec it already had from `Imports:`.
+/// Entries with other prefixes (`bitbucket::`, `git::`, `url::`,
+/// `local::`, `bioc::`) are skipped for now — the caller keeps whatever
+/// version-based spec it already had from `Imports:`.
 ///
 /// Visible to the github registry so it can walk transitive `Remotes:`
-/// chains during `uvr lock` (#84) — and to the forgejo registry for the
-/// same reason.
+/// chains during `uvr lock` (#84) — and to the forgejo/gitlab registries
+/// for the same reason.
 pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> {
     let mut result = Vec::new();
     for entry in field.split(',') {
@@ -339,16 +341,22 @@ pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> 
             continue;
         }
 
-        // Two registries are translated today: github (the bare/`github::`
-        // form, returning `git = "owner/repo"`) and forgejo (the
-        // `forgejo::host/owner/repo` form, returning the same prefix
-        // verbatim in `git` so the lock-time BFS can dispatch on it).
-        // Other prefixes (`gitlab::`, `bitbucket::`, `git::`, `url::`,
+        // Three registries are translated today: github (the bare/`github::`
+        // form, returning `git = "owner/repo"`), forgejo (the
+        // `forgejo::host/owner/repo` form), and gitlab (the
+        // `gitlab::host/group/.../project` form) — the latter two return
+        // their prefix verbatim in `git` so the lock-time BFS can dispatch
+        // on it. Other prefixes (`bitbucket::`, `git::`, `url::`,
         // `local::`, `bioc::`) are skipped — the caller keeps whatever
         // version-based spec it already had from `Imports:`.
-        let forgejo_body = entry.strip_prefix("forgejo::");
-        if let Some(body) = forgejo_body {
+        if let Some(body) = entry.strip_prefix("forgejo::") {
             if let Some(parsed) = parse_forgejo_entry(body) {
+                result.push(parsed);
+            }
+            continue;
+        }
+        if let Some(body) = entry.strip_prefix("gitlab::") {
+            if let Some(parsed) = parse_gitlab_entry(body) {
                 result.push(parsed);
             }
             continue;
@@ -491,6 +499,60 @@ fn parse_forgejo_entry(body: &str) -> Option<(String, DependencySpec)> {
     Some((pkg_name, spec))
 }
 
+/// Parse the `host/group[/subgroup...]/project[@ref]` body of a
+/// `gitlab::`-prefixed `Remotes:` entry into `(pkg_name, DependencySpec)`.
+/// The package name defaults to the project segment. Returns `None` if the
+/// body is malformed. Mirrors [`parse_forgejo_entry`] — the difference is
+/// that GitLab's namespace path can nest arbitrarily deep, which
+/// [`crate::registry::gitlab::parse_gitlab_parts`] already accounts for.
+///
+/// The `git` field stores the *full* `"gitlab::host/group/.../project"`
+/// string (prefix included) so downstream code that walks `Remotes:`
+/// chains can tell gitlab specs apart from github/forgejo ones by string
+/// prefix.
+fn parse_gitlab_entry(body: &str) -> Option<(String, DependencySpec)> {
+    // Optional `pkgname=` override.
+    let (explicit_name, path) = match body.split_once('=') {
+        Some((n, p)) if !n.trim().is_empty() && p.trim().contains('/') => {
+            (Some(n.trim().to_string()), p.trim())
+        }
+        _ => (None, body),
+    };
+
+    let (path_no_anchor, rev) = match path.split_once('@') {
+        Some((p, r)) => {
+            let r = r.split('#').next().unwrap_or(r).trim();
+            (
+                p.trim(),
+                if r.is_empty() {
+                    None
+                } else {
+                    Some(r.to_string())
+                },
+            )
+        }
+        None => (path.split('#').next().unwrap_or(path).trim(), None),
+    };
+
+    // Validate the host/group/.../project shape through the shared parser
+    // so the manifest accepts/rejects the same specs as the CLI and
+    // resolver. The pkgname= override and @ref/#anchor handling above are
+    // Remotes-field syntax the shared parser doesn't know about, so we
+    // strip them first.
+    let parsed = crate::registry::gitlab::parse_gitlab_parts(path_no_anchor)?;
+    let pkg_name = explicit_name.unwrap_or_else(|| parsed.project_name().to_string());
+    if pkg_name.is_empty() {
+        return None;
+    }
+
+    let spec = DependencySpec::Detailed(DetailedDep {
+        git: Some(format!("gitlab::{}/{}", parsed.host, parsed.project_path)),
+        rev,
+        ..Default::default()
+    });
+    Some((pkg_name, spec))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +660,7 @@ Remotes:
     B-Nilson/airquality,
     github::B-Nilson/handyr@dev,
     gitlab::other/thing,
+    gitlab::gitlab.com/my-group/mypkg@v1.0,
     pkg=user/repo@v1.0
 "#;
         let m = Manifest::from_description_str(dcf).expect("parse");
@@ -619,8 +682,20 @@ Remotes:
         let dp = m.dependencies.get("dplyr").unwrap();
         assert!(matches!(dp, DependencySpec::Version(v) if v == "*"));
 
-        // gitlab:: is skipped — "thing" should not appear as a dep
+        // gitlab:: is parsed, but a real spec needs host/group/project at
+        // minimum — "other/thing" has only two segments (host + project,
+        // no group), so it fails validation and "thing" correctly does
+        // not appear as a dep.
         assert!(!m.dependencies.contains_key("thing"));
+
+        // gitlab:: with a valid host/group/project shape does parse.
+        let ml = m.dependencies.get("mypkg").unwrap();
+        assert_eq!(ml.git(), Some("gitlab::gitlab.com/my-group/mypkg"));
+        if let DependencySpec::Detailed(d) = ml {
+            assert_eq!(d.rev.as_deref(), Some("v1.0"));
+        } else {
+            panic!("mypkg should be a detailed git dep");
+        }
 
         // pkg=user/repo → explicit pkg name with @ref
         let pk = m.dependencies.get("pkg").unwrap();
@@ -809,11 +884,15 @@ bioc = true
     }
 
     #[test]
-    fn parse_remotes_field_keeps_forgejo() {
-        let field = "forgejo::codefloe.com/pat-s/mypkg@v0.1.0, github::user/a, gitlab::other/x";
+    fn parse_remotes_field_keeps_forgejo_and_gitlab() {
+        let field = "forgejo::codefloe.com/pat-s/mypkg@v0.1.0, github::user/a, \
+                     gitlab::other/x, gitlab::gitlab.com/my-group/my-sub/thing@v2.0";
         let v = parse_remotes_field(field);
         let names: Vec<&str> = v.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["mypkg", "a"]);
+        // "other/x" has only two segments (host + project, no group) —
+        // not a valid gitlab spec — so it's dropped, not because gitlab
+        // is unsupported.
+        assert_eq!(names, vec!["mypkg", "a", "thing"]);
 
         // The forgejo entry stores the full `forgejo::host/owner/repo` in
         // the `git` field, with the ref split into `rev`.
@@ -821,6 +900,19 @@ bioc = true
             DependencySpec::Detailed(d) => {
                 assert_eq!(d.git.as_deref(), Some("forgejo::codefloe.com/pat-s/mypkg"));
                 assert_eq!(d.rev.as_deref(), Some("v0.1.0"));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+
+        // The gitlab entry stores the full `gitlab::host/group/.../project`
+        // string (nested subgroup included), with the ref split into `rev`.
+        match &v[2].1 {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(
+                    d.git.as_deref(),
+                    Some("gitlab::gitlab.com/my-group/my-sub/thing")
+                );
+                assert_eq!(d.rev.as_deref(), Some("v2.0"));
             }
             other => panic!("expected Detailed, got {other:?}"),
         }

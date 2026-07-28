@@ -70,6 +70,12 @@ pub enum PackageSource {
     Forgejo {
         host: String,
     },
+    /// A GitLab-hosted package (gitlab.com or self-managed). `host` is the
+    /// bare hostname (optionally `host:port`), e.g. `"gitlab.com"`.
+    /// Serializes as `"gitlab:<host>"` in the lockfile.
+    Gitlab {
+        host: String,
+    },
     Local,
     /// A custom CRAN-like repository (r-multiverse, r-universe, PPM, etc.)
     Custom {
@@ -108,6 +114,15 @@ impl<'de> Deserialize<'de> for PackageSource {
                         });
                     }
                 }
+                // Same shape for `gitlab:<host>` — an empty host falls
+                // through to Custom rather than a hollow Gitlab variant.
+                if let Some(host) = s.strip_prefix("gitlab:") {
+                    if !host.is_empty() {
+                        return Ok(PackageSource::Gitlab {
+                            host: host.to_string(),
+                        });
+                    }
+                }
                 PackageSource::Custom { name: s }
             }
         })
@@ -121,6 +136,7 @@ impl std::fmt::Display for PackageSource {
             PackageSource::Bioconductor => write!(f, "bioconductor"),
             PackageSource::GitHub => write!(f, "github"),
             PackageSource::Forgejo { host } => write!(f, "forgejo:{host}"),
+            PackageSource::Gitlab { host } => write!(f, "gitlab:{host}"),
             PackageSource::Local => write!(f, "local"),
             PackageSource::Custom { name } => write!(f, "{name}"),
         }
@@ -319,6 +335,76 @@ source = "forgejo:git.local:3000"
         );
         let s = lf.to_toml_string().unwrap();
         assert!(s.contains(r#"source = "forgejo:git.local:3000""#));
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
+    }
+
+    #[test]
+    fn round_trip_gitlab_source() {
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "mypkg"
+version = "0.1.0"
+source = "gitlab:gitlab.com"
+url = "https://gitlab.com/api/v4/projects/group%2Fmypkg/repository/archive.tar.gz?sha=abc123"
+"#;
+        let lf: Lockfile = input.parse().expect("parse gitlab source");
+        assert_eq!(
+            lf.packages[0].source,
+            PackageSource::Gitlab {
+                host: "gitlab.com".to_string()
+            }
+        );
+
+        let s = lf.to_toml_string().unwrap();
+        assert!(s.contains(r#"source = "gitlab:gitlab.com""#));
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
+    }
+
+    #[test]
+    fn gitlab_source_empty_host_falls_to_custom() {
+        // Defensive: a malformed `"gitlab:"` (empty host) deserializes
+        // to Custom, not to Gitlab with an empty host string.
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "x"
+version = "0.1.0"
+source = "gitlab:"
+"#;
+        let lf: Lockfile = input.parse().expect("parse");
+        assert!(matches!(
+            lf.packages[0].source,
+            PackageSource::Custom { ref name } if name == "gitlab:"
+        ));
+    }
+
+    #[test]
+    fn round_trip_gitlab_source_with_port() {
+        let input = r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "mypkg"
+version = "0.1.0"
+source = "gitlab:git.local:3000"
+"#;
+        let lf: Lockfile = input.parse().expect("parse gitlab source with port");
+        assert_eq!(
+            lf.packages[0].source,
+            PackageSource::Gitlab {
+                host: "git.local:3000".to_string()
+            }
+        );
+        let s = lf.to_toml_string().unwrap();
+        assert!(s.contains(r#"source = "gitlab:git.local:3000""#));
         let lf2: Lockfile = s.parse().unwrap();
         assert_eq!(lf, lf2);
     }

@@ -2386,6 +2386,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "urlencoding",
  "uvr-core",
  "which",
  "zip",

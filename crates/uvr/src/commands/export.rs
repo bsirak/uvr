@@ -114,6 +114,15 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             _ => None,
         };
 
+        let gitlab_info = match &pkg.source {
+            PackageSource::Gitlab { .. } => pkg.url.as_ref().and_then(|u| parse_gitlab_remote(u)),
+            _ => None,
+        };
+
+        // gitlab's "owner" is a full (possibly nested) namespace path
+        // rather than a single segment — same field, different shape.
+        let git_host_info = forgejo_info.as_ref().or(gitlab_info.as_ref());
+
         let entry = RenvPackage {
             package: pkg.name.clone(),
             version,
@@ -123,19 +132,18 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             remote_username: remote_info
                 .as_ref()
                 .map(|(user, _, _)| user.clone())
-                .or_else(|| forgejo_info.as_ref().map(|(_, owner, _, _)| owner.clone())),
+                .or_else(|| git_host_info.map(|(_, owner, _, _)| owner.clone())),
             remote_repo: remote_info
                 .as_ref()
                 .map(|(_, repo, _)| repo.clone())
-                .or_else(|| forgejo_info.as_ref().map(|(_, _, repo, _)| repo.clone())),
+                .or_else(|| git_host_info.map(|(_, _, repo, _)| repo.clone())),
             remote_ref: remote_info
                 .as_ref()
                 .and_then(|(_, _, r)| r.clone())
-                .or_else(|| forgejo_info.as_ref().map(|(_, _, _, sha)| sha.clone())),
-            remote_url: forgejo_info
-                .as_ref()
+                .or_else(|| git_host_info.map(|(_, _, _, sha)| sha.clone())),
+            remote_url: git_host_info
                 .map(|(host, owner, repo, _)| format!("https://{host}/{owner}/{repo}")),
-            remote_type: forgejo_info.as_ref().map(|_| "git2r".to_string()),
+            remote_type: git_host_info.map(|_| "git2r".to_string()),
         };
         packages.insert(pkg.name.clone(), entry);
     }
@@ -171,16 +179,21 @@ fn bioc_repositories(version: &str) -> Vec<RenvRepo> {
 
 /// Map a `PackageSource` to renv's (Source, Repository) string pair for
 /// the renv.lock export. Extracted from the inline match in
-/// `export_renv` so we can unit-test the Forgejo mapping without
-/// constructing a full `Lockfile`. Forgejo maps to renv's `Source: Git`
-/// (the git2r-backed remote) — renv has no Forgejo-aware type, so a
-/// generic Git mapping with `RemoteUrl` set is the most importable shape.
+/// `export_renv` so we can unit-test the Forgejo/Gitlab mapping without
+/// constructing a full `Lockfile`. Forgejo and Gitlab both map to renv's
+/// `Source: Git` (the git2r-backed remote) — renv has no Forgejo- or
+/// Gitlab-aware type, so a generic Git mapping with `RemoteUrl` set is the
+/// most importable shape. The two forges stay distinguishable downstream:
+/// `RemoteUrl`/`RemoteUsername`/`RemoteRepo`/`RemoteRef` (built separately
+/// from each package's own archive URL) still carry the real host/owner/
+/// repo/sha.
 fn export_source_and_repository(src: &PackageSource) -> (String, Option<String>) {
     match src {
         PackageSource::Cran => ("Repository".to_string(), Some("CRAN".to_string())),
         PackageSource::Bioconductor => ("Bioconductor".to_string(), None),
         PackageSource::GitHub => ("GitHub".to_string(), None),
         PackageSource::Forgejo { .. } => ("Git".to_string(), None),
+        PackageSource::Gitlab { .. } => ("Git".to_string(), None),
         PackageSource::Local => ("Local".to_string(), None),
         PackageSource::Custom { name } => ("Repository".to_string(), Some(name.clone())),
     }
@@ -228,6 +241,57 @@ fn parse_forgejo_remote(url: &str) -> Option<(String, String, String, String)> {
         return None;
     }
     Some((host.to_string(), owner, repo, sha))
+}
+
+/// Parse a GitLab archive URL into (host, namespace_path, project, sha).
+/// Returns `None` if the URL doesn't match the expected
+/// `/api/v4/projects/{id}/repository/archive.tar.gz?sha={sha}` shape.
+///
+/// `namespace_path` is the decoded group/subgroup path (everything before
+/// the final project segment) — GitLab's nested groups mean this, unlike
+/// Forgejo/GitHub's single-segment owner, can itself contain slashes.
+/// `{id}` is percent-encoded (`urlencoding::encode` turns `/` into `%2F`
+/// when the URL is built); decoding it back is a plain string replace
+/// rather than a full percent-decode, since the only escaped character a
+/// project path can contain is that separator — every segment is already
+/// restricted to `[alnum].-_` by `parse_gitlab_parts`, all of which sit
+/// outside the escaped range.
+fn parse_gitlab_remote(url: &str) -> Option<(String, String, String, String)> {
+    let (base, query) = url.split_once('?')?;
+    let parts: Vec<&str> = base.split('/').collect();
+    let api_idx = parts.iter().position(|s| *s == "api")?;
+    if parts.get(api_idx + 1).copied()? != "v4" {
+        return None;
+    }
+    if parts.get(api_idx + 2).copied()? != "projects" {
+        return None;
+    }
+    let encoded_id = parts.get(api_idx + 3)?;
+    if parts.get(api_idx + 4).copied()? != "repository" {
+        return None;
+    }
+    if parts.get(api_idx + 5).copied()? != "archive.tar.gz" {
+        return None;
+    }
+    let decoded_id = encoded_id.replace("%2F", "/").replace("%2f", "/");
+    let (namespace_path, project) = decoded_id.rsplit_once('/')?;
+    if namespace_path.is_empty() || project.is_empty() {
+        return None;
+    }
+    let host = parts.get(api_idx.checked_sub(1)?).copied()?;
+    if host.is_empty() {
+        return None;
+    }
+    let sha = query.strip_prefix("sha=")?;
+    if sha.is_empty() {
+        return None;
+    }
+    Some((
+        host.to_string(),
+        namespace_path.to_string(),
+        project.to_string(),
+        sha.to_string(),
+    ))
 }
 
 #[derive(Serialize)]
@@ -571,6 +635,91 @@ mod tests {
         assert_eq!(host, "codefloe.com");
         assert_eq!(owner, "pat-s");
         assert_eq!(repo, "mypkg");
+        assert_eq!(sha, "abc123");
+    }
+
+    #[test]
+    fn export_gitlab_package() {
+        use uvr_core::lockfile::{LockedPackage, PackageSource};
+
+        let pkg = LockedPackage {
+            name: "mypkg".into(),
+            version: "0.1.0".into(),
+            source: PackageSource::Gitlab {
+                host: "gitlab.com".into(),
+            },
+            checksum: Some("git:abc123".into()),
+            url: Some(
+                "https://gitlab.com/api/v4/projects/my-group%2Fmypkg/repository/archive.tar.gz?sha=abc123"
+                    .into(),
+            ),
+            requires: vec![],
+            raw_version: None,
+            system_requirements: None,
+            dev: false,
+        };
+        let (source, repository) = export_source_and_repository(&pkg.source);
+        assert_eq!(source, "Git");
+        assert_eq!(repository, None);
+    }
+
+    #[test]
+    fn export_renv_gitlab_package_emits_remote_url_and_type() {
+        use uvr_core::lockfile::{LockedPackage, Lockfile, PackageSource, RVersionPin};
+
+        let lockfile = Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![LockedPackage {
+                name: "mypkg".to_string(),
+                version: "0.1.0".to_string(),
+                raw_version: None,
+                source: PackageSource::Gitlab {
+                    host: "gitlab.com".to_string(),
+                },
+                checksum: Some("git:abc123".to_string()),
+                requires: vec![],
+                url: Some(
+                    "https://gitlab.com/api/v4/projects/my-group%2Fmypkg/repository/archive.tar.gz?sha=abc123"
+                        .to_string(),
+                ),
+                system_requirements: None,
+                dev: false,
+            }],
+        };
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["Packages"]["mypkg"]["Source"], "Git");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteType"], "git2r");
+        assert_eq!(
+            parsed["Packages"]["mypkg"]["RemoteUrl"],
+            "https://gitlab.com/my-group/mypkg"
+        );
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteUsername"], "my-group");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRepo"], "mypkg");
+        assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "abc123");
+    }
+
+    #[test]
+    fn parse_gitlab_remote_archive_url() {
+        let url = "https://gitlab.com/api/v4/projects/my-group%2Fmypkg/repository/archive.tar.gz?sha=abc123";
+        let (host, namespace_path, project, sha) = parse_gitlab_remote(url).unwrap();
+        assert_eq!(host, "gitlab.com");
+        assert_eq!(namespace_path, "my-group");
+        assert_eq!(project, "mypkg");
+        assert_eq!(sha, "abc123");
+    }
+
+    #[test]
+    fn parse_gitlab_remote_archive_url_nested_subgroup() {
+        let url = "https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fmypkg/repository/archive.tar.gz?sha=abc123";
+        let (host, namespace_path, project, sha) = parse_gitlab_remote(url).unwrap();
+        assert_eq!(host, "gitlab.com");
+        assert_eq!(namespace_path, "group/subgroup");
+        assert_eq!(project, "mypkg");
         assert_eq!(sha, "abc123");
     }
 

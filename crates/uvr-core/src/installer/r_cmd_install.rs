@@ -44,6 +44,22 @@ pub fn effective_install_timeout(explicit: Option<Duration>) -> Duration {
     DEFAULT_INSTALL_TIMEOUT
 }
 
+/// Combine stdout and stderr for an error log. `R CMD INSTALL` splits its
+/// output across both streams inconsistently (progress messages and the
+/// actual `Error in ... :` cause can land on either one depending on
+/// platform/R version), so picking a single stream risks silently dropping
+/// the line that explains the failure. Falls back to whichever stream is
+/// non-empty when the other is blank, so single-stream output isn't padded
+/// with a stray blank line.
+fn combine_logs(stdout: &str, stderr: &str) -> String {
+    match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => stderr.to_string(),
+        (false, true) => stdout.to_string(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    }
+}
+
 /// Remove a stale `00LOCK-<package>/` directory left behind by an aborted
 /// `R CMD INSTALL`. Best-effort: if removal fails the next install attempt
 /// will surface a clearer error than a silent skip would.
@@ -122,7 +138,7 @@ impl RCmdInstall {
                 let code = output.status.code().unwrap_or(-1);
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let log = if stderr.is_empty() { stdout } else { stderr };
+                let log = combine_logs(&stdout, &stderr);
                 return Err(UvrError::Other(format!(
                     "R CMD INSTALL failed for '{package_name}' (exit {code}):\n{log}"
                 )));
@@ -299,13 +315,7 @@ impl RCmdInstall {
 
         if !status.success() {
             let code = status.code().unwrap_or(-1);
-            // Prefer stderr for the error log; fall back to stdout when the
-            // build wrote its diagnostics there instead.
-            let log = if all_stderr.trim().is_empty() {
-                all_stdout
-            } else {
-                all_stderr
-            };
+            let log = combine_logs(&all_stdout, &all_stderr);
             return Err(UvrError::Other(format!(
                 "R CMD INSTALL failed for '{package_name}' (exit {code}):\n{log}"
             )));
@@ -431,6 +441,26 @@ impl RCmdInstall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combine_logs_prefers_non_empty_single_stream() {
+        assert_eq!(combine_logs("", "boom"), "boom");
+        assert_eq!(combine_logs("progress", ""), "progress");
+        assert_eq!(combine_logs("", ""), "");
+    }
+
+    #[test]
+    fn combine_logs_merges_both_streams() {
+        // Regression: R CMD INSTALL splits progress and the actual `Error
+        // in ... :` cause across stdout/stderr inconsistently — dropping
+        // either one can hide why lazy loading failed.
+        let log = combine_logs(
+            "** byte-compile...\nERROR: lazy loading failed",
+            "Error in loadNamespace(x) : there is no package called 'foo'",
+        );
+        assert!(log.contains("ERROR: lazy loading failed"));
+        assert!(log.contains("there is no package called 'foo'"));
+    }
 
     #[test]
     fn parse_seconds_default() {

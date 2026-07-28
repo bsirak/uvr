@@ -142,9 +142,10 @@ pub struct DownloadSpec<'a> {
     /// source. None = use the client's default UA.
     pub user_agent: Option<&'a str>,
     /// Optional `Authorization` header value (e.g. `"token <forgejo>"` or
-    /// `"Bearer <github>"`). Forwarded to the primary URL only. Fallback
-    /// URLs (CRAN Archive, P3M → source) deliberately drop the header —
-    /// the token is registry-scoped and shouldn't leak to other hosts.
+    /// `"Bearer <github/gitlab>"`). Forwarded to the primary URL only.
+    /// Fallback URLs (CRAN Archive, P3M → source) deliberately drop the
+    /// header — the token is registry-scoped and shouldn't leak to other
+    /// hosts.
     pub auth_header: Option<&'a str>,
 }
 
@@ -199,6 +200,11 @@ fn cache_filename(url: &str, user_agent: Option<&str>, fallback_name: &str) -> S
     let basename = url
         .rsplit('/')
         .next()
+        // Strip any query string/fragment (e.g. GitLab's
+        // `archive.tar.gz?sha=...`) — `?` is an illegal filename character on
+        // Windows, and left in it breaks persisting the downloaded temp file
+        // (os error 123).
+        .map(|s| s.split(['?', '#']).next().unwrap_or(s))
         .filter(|s| !s.is_empty())
         .unwrap_or(fallback_name);
     let mut hasher = Sha256::new();
@@ -557,6 +563,20 @@ mod tests {
             cache_filename(url, None, "curl_7.0.0.tar.gz"),
             cache_filename(url, None, "curl_7.0.0.tar.gz"),
         );
+    }
+
+    #[test]
+    fn cache_filename_strips_query_string() {
+        // GitLab archive URLs carry `?sha=...` in the final path segment;
+        // `?` is illegal in Windows filenames (os error 123) if left in.
+        let url =
+            "https://gitlab.example.com/api/v4/projects/42/repository/archive.tar.gz?sha=abc123";
+        let name = cache_filename(url, None, "mypkg_0.1.0.tar.gz");
+        assert!(
+            !name.contains('?'),
+            "cache filename must not contain '?': {name}"
+        );
+        assert!(name.ends_with("-archive.tar.gz"));
     }
 
     #[test]

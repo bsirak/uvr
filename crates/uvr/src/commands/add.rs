@@ -6,6 +6,7 @@ use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 use uvr_core::registry::bioconductor::{default_release_for_r, BiocRegistry};
 use uvr_core::registry::forgejo::parse_forgejo_parts;
+use uvr_core::registry::gitlab::parse_gitlab_parts;
 use uvr_core::resolver::is_base_package;
 
 use crate::ui;
@@ -33,6 +34,26 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
         return Ok((parsed.repo, spec));
     }
 
+    // GitLab: explicit `gitlab::host/group[/subgroup...]/project[@ref]`
+    // prefix. Checked before the bare `user/repo` heuristic below for the
+    // same reason as Forgejo above. GitLab projects can live under nested
+    // groups, so the parsed spec carries a full namespace path rather than
+    // a single owner segment.
+    if raw.starts_with("gitlab::") {
+        let Some(parsed) = parse_gitlab_parts(raw) else {
+            anyhow::bail!(
+                "Invalid GitLab spec '{raw}'. Expected: gitlab::host/group/project or gitlab::host/group/subgroup/project[@ref]"
+            );
+        };
+        let name = parsed.project_name().to_string();
+        let spec = DependencySpec::Detailed(DetailedDep {
+            git: Some(format!("gitlab::{}/{}", parsed.host, parsed.project_path)),
+            rev: parsed.git_ref,
+            ..Default::default()
+        });
+        return Ok((name, spec));
+    }
+
     // GitHub: contains '/'
     if raw.contains('/') {
         let (repo, git_ref) = if let Some(at) = raw.rfind('@') {
@@ -45,14 +66,17 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
         let parts: Vec<&str> = repo.split('/').collect();
         if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
             // A first segment containing a dot looks like a hostname
-            // (e.g. `gitlab.com/user/repo`): the real problem is an
-            // unsupported git host, not a malformed GitHub spec — say so
-            // instead of the misleading "Invalid GitHub spec" (#145).
+            // (e.g. `gitlab.com/user/repo`, `git.local:3000/u/r`): the real
+            // problem is a missing explicit prefix, not a malformed GitHub
+            // spec — say so instead of the misleading "Invalid GitHub spec"
+            // (#145). Forgejo and GitLab hosts can't be auto-detected from
+            // a bare `host/owner/repo` shape, so both require their `::`
+            // prefix.
             if parts[0].contains('.') {
                 anyhow::bail!(
                     "Unsupported git host '{host}' in '{raw}'. Supported specs: \
-                     GitHub via user/repo[@ref], Forgejo via forgejo::host/owner/repo[@ref]. \
-                     GitLab support is tracked in https://github.com/nbafrank/uvr/issues/123",
+                     GitHub via user/repo[@ref], Forgejo via forgejo::host/owner/repo[@ref], \
+                     GitLab via gitlab::host/group/project[@ref].",
                     host = parts[0],
                 );
             }
@@ -411,7 +435,7 @@ async fn probe_bioc(project: &Project, name: &str) -> Option<bool> {
         .map(|bioc| bioc.contains(name))
 }
 
-/// For each git-sourced dep (github or forgejo) in `parsed`, fetch the remote
+/// For each git-sourced dep (github, forgejo, or gitlab) in `parsed`, fetch the remote
 /// DESCRIPTION and replace the URL-derived name with the actual `Package:`
 /// field (uvr-r #8). Mutates in place. Best-effort — every failure path
 /// (transport error, missing DESCRIPTION, malformed file) is logged
@@ -471,6 +495,20 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
             );
             let auth =
                 uvr_core::registry::forgejo::forgejo_token(host).map(|t| format!("token {t}"));
+            (url, auth)
+        } else if let Some(body) = git.strip_prefix("gitlab::") {
+            let parts: Vec<&str> = body.split('/').collect();
+            if parts.len() < 3 || parts.iter().any(|s| s.is_empty()) {
+                continue;
+            }
+            let host = parts[0];
+            let project_id = urlencoding::encode(&parts[1..].join("/")).into_owned();
+            let url = format!(
+                "https://{host}/api/v4/projects/{project_id}/repository/files/DESCRIPTION/raw?ref={r}",
+                r = git_ref_owned,
+            );
+            let auth =
+                uvr_core::registry::gitlab::gitlab_token(host).map(|t| format!("Bearer {t}"));
             (url, auth)
         } else {
             // github: `user/repo`
@@ -624,7 +662,7 @@ mod tests {
         );
         assert!(msg.contains("user/repo"), "should list GitHub form: {msg}");
         assert!(msg.contains("forgejo::"), "should list Forgejo form: {msg}");
-        assert!(msg.contains("issues/123"), "should reference #123: {msg}");
+        assert!(msg.contains("gitlab::"), "should list GitLab form: {msg}");
         assert!(!msg.contains("Invalid GitHub spec"), "misleading: {msg}");
     }
 
@@ -667,6 +705,54 @@ mod tests {
         assert!(parse_add_spec("forgejo::codefloe.com/onlyone", false).is_err());
         assert!(parse_add_spec("forgejo::/pat-s/mypkg", false).is_err());
         assert!(parse_add_spec("forgejo::codefloe.com//mypkg", false).is_err());
+    }
+
+    #[test]
+    fn parse_gitlab_spec_cli() {
+        let (name, spec) = parse_add_spec("gitlab::gitlab.com/my-group/mypkg@main", false).unwrap();
+        assert_eq!(name, "mypkg");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.git.as_deref(), Some("gitlab::gitlab.com/my-group/mypkg"));
+                assert_eq!(d.rev.as_deref(), Some("main"));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gitlab_spec_cli_nested_subgroup() {
+        let (name, spec) =
+            parse_add_spec("gitlab::gitlab.com/group/subgroup/mypkg@main", false).unwrap();
+        assert_eq!(name, "mypkg");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(
+                    d.git.as_deref(),
+                    Some("gitlab::gitlab.com/group/subgroup/mypkg")
+                );
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gitlab_spec_cli_no_ref() {
+        let (name, spec) = parse_add_spec("gitlab::gitlab.com/my-group/mypkg", false).unwrap();
+        assert_eq!(name, "mypkg");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.rev, None);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_gitlab_spec_cli_rejects_bad_shape() {
+        assert!(parse_add_spec("gitlab::gitlab.com/onlyone", false).is_err());
+        assert!(parse_add_spec("gitlab::/my-group/mypkg", false).is_err());
+        assert!(parse_add_spec("gitlab::gitlab.com//mypkg", false).is_err());
     }
 
     #[test]
