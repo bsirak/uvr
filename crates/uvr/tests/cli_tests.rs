@@ -726,3 +726,87 @@ fn test_activate_write_shim_restores_deleted_shims() {
         .success();
     assert!(fish.exists(), "--write-shim did not restore the fish shim");
 }
+
+/// True when a PowerShell interpreter is on PATH.
+fn have_pwsh() -> bool {
+    std::process::Command::new("pwsh")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn test_activate_powershell_isolation_survives_a_real_shell() {
+    // Runs wherever pwsh exists — notably the windows-latest CI runner.
+    //
+    // The load-bearing assertion is that `$env:R_LIBS_SITE` is *present and
+    // empty* after the emitted script runs. Win32's SetEnvironmentVariable
+    // deletes a variable assigned an empty string, and if PowerShell routes
+    // through that on Windows, the three blanked isolation variables would
+    // become absent and R would fall back to the system site library. Verified
+    // correct on PowerShell 7.6 for Linux; this test is what would catch the
+    // Windows case before a user does.
+    if !have_pwsh() {
+        eprintln!("skipping: pwsh not installed");
+        return;
+    }
+
+    let dir = init_project("psiso");
+    let out = uvr_cmd()
+        .args(["activate", "--emit", "powershell"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let script = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    let emitted = dir.path().join("emitted.ps1");
+    fs::write(&emitted, &script).unwrap();
+
+    let runner = dir.path().join("runner.ps1");
+    fs::write(
+        &runner,
+        format!(
+            r#". "{}"
+Write-Output ("LIBS_USER=" + $env:R_LIBS_USER)
+Write-Output ("SITE_PRESENT=" + (Test-Path Env:\R_LIBS_SITE))
+Write-Output ("SITE_VALUE=[" + $env:R_LIBS_SITE + "]")
+Write-Output ("ENVIRON_USER_PRESENT=" + (Test-Path Env:\R_ENVIRON_USER))
+Write-Output ("PROJECT=" + $env:UVR_PROJECT)
+deactivate
+Write-Output ("AFTER_PROJECT_PRESENT=" + (Test-Path Env:\UVR_PROJECT))
+Write-Output ("AFTER_DEACTIVATE_PRESENT=" + (Test-Path Function:\deactivate))
+"#,
+            emitted.display()
+        ),
+    )
+    .unwrap();
+
+    let res = std::process::Command::new("pwsh")
+        .args(["-NoProfile", "-File"])
+        .arg(&runner)
+        .output()
+        .expect("run pwsh");
+    let stdout = String::from_utf8_lossy(&res.stdout);
+    assert!(
+        res.status.success(),
+        "pwsh failed: {}\n{}",
+        String::from_utf8_lossy(&res.stderr),
+        stdout
+    );
+
+    assert!(
+        stdout.contains("SITE_PRESENT=True"),
+        "R_LIBS_SITE was deleted rather than set empty — the system site \
+         library is no longer shadowed:\n{stdout}"
+    );
+    assert!(stdout.contains("SITE_VALUE=[]"), "{stdout}");
+    assert!(stdout.contains("ENVIRON_USER_PRESENT=True"), "{stdout}");
+    assert!(stdout.contains("PROJECT=psiso"), "{stdout}");
+    // deactivate must leave nothing of ours behind.
+    assert!(stdout.contains("AFTER_PROJECT_PRESENT=False"), "{stdout}");
+    assert!(
+        stdout.contains("AFTER_DEACTIVATE_PRESENT=False"),
+        "{stdout}"
+    );
+}

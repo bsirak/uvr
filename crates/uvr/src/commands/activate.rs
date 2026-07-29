@@ -299,6 +299,17 @@ fn emit_fish(project: &str, env: &REnv, prompt: bool) -> String {
     out
 }
 
+/// Emit PowerShell activation.
+///
+/// Assigning `''` through the `$env:` provider sets a present-but-empty
+/// variable that child processes inherit — checked on PowerShell 7.6, where
+/// R sees `R_LIBS_SITE=` and drops the system site library. That matters
+/// because Win32's `SetEnvironmentVariable` *deletes* a variable given an
+/// empty string; were PowerShell to route through that, the three blanked
+/// isolation variables would go absent and the site library would leak back.
+/// `test_activate_powershell_isolation_survives_a_real_shell` pins the
+/// behaviour and runs on the Windows CI runner, so that divergence would
+/// surface there rather than in a user's session.
 fn emit_powershell(project: &str, env: &REnv, prompt: bool) -> String {
     let mut out = String::new();
     out.push_str(&format!(
