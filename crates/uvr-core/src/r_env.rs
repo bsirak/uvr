@@ -87,11 +87,15 @@ impl REnv {
     /// child process, `uvr activate` exports the same pairs into the shell.
     ///
     /// Note the deliberately-empty values — `R_LIBS_SITE` and `R_LIBS` are
-    /// blanked so a system-wide library cannot leak into a project, and
-    /// `R_ENVIRON` is blanked so a user `~/.Renviron` cannot re-point the
-    /// library out from under us. (`uvr run` additionally passes
-    /// `--no-environ`; activation has no equivalent process flag, which is
-    /// why blanking the variable matters rather than relying on the flag.)
+    /// blanked so a system-wide library cannot leak into a project.
+    ///
+    /// **Both** Renviron variables must be blanked. `R_ENVIRON` covers only
+    /// the *site* file; the per-user `~/.Renviron` is gated separately by
+    /// `R_ENVIRON_USER`, and a user whose `~/.Renviron` sets `R_LIBS_USER`
+    /// would otherwise have it silently override the project library. `uvr
+    /// run` is additionally protected by its `--no-environ` process flag,
+    /// but a sourced activation script has no such flag — so blanking the
+    /// variables is what actually does the work here.
     pub fn vars(&self) -> Vec<(&'static str, String)> {
         let r_lib_dir = self.r_lib_dir().to_string_lossy().into_owned();
         vec![
@@ -101,6 +105,7 @@ impl REnv {
             ("DYLD_LIBRARY_PATH", r_lib_dir.clone()),
             ("LD_LIBRARY_PATH", r_lib_dir),
             ("R_ENVIRON", String::new()),
+            ("R_ENVIRON_USER", String::new()),
         ]
     }
 }
@@ -180,6 +185,10 @@ mod tests {
         assert_eq!(get("R_LIBS_SITE"), "");
         assert_eq!(get("R_LIBS"), "");
         assert_eq!(get("R_ENVIRON"), "");
+        // R_ENVIRON alone covers only the *site* Renviron. Without this, a
+        // user whose ~/.Renviron sets R_LIBS_USER silently gets their own
+        // library instead of the project's — verified against real R.
+        assert_eq!(get("R_ENVIRON_USER"), "");
         assert_eq!(get("DYLD_LIBRARY_PATH"), "/opt/R/4.4.2/lib");
         assert_eq!(get("LD_LIBRARY_PATH"), "/opt/R/4.4.2/lib");
     }
