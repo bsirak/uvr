@@ -256,21 +256,23 @@ jobs:
           - name: arch (unmapped)
             image: archlinux:latest
             expect: manylinux_2_28
-            setup: pacman -Sy --noconfirm --needed gcc make which fontconfig ca-certificates libxml2
+            setup: pacman -Sy --noconfirm --needed gcc make pkgconf which fontconfig ca-certificates libxml2
           - name: fedora (unmapped)
             image: fedora:42
             expect: manylinux_2_28
-            setup: dnf -y install gcc make which fontconfig ca-certificates libxml2-devel
+            setup: dnf -y install gcc gcc-c++ make pkgconf-pkg-config which fontconfig ca-certificates libxml2-devel
           # Repos uvr previously did not map, so these users compiled everything.
           - name: debian 13 (trixie)
             image: debian:trixie
             expect: trixie
-            setup: apt-get update && apt-get install -y --no-install-recommends gcc make ca-certificates fontconfig libxml2-dev
+            setup: apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config ca-certificates fontconfig libxml2-dev
           - name: rocky 10 (rhel10)
             image: rockylinux/rockylinux:10
             expect: rhel10
-            setup: dnf -y install gcc make which fontconfig ca-certificates libxml2-devel
+            setup: dnf -y install gcc gcc-c++ make pkgconf-pkg-config which fontconfig ca-certificates libxml2-devel
     steps:
+      # The C/C++ toolchain, pkg-config and libxml2 headers are needed only by
+      # the `--no-binary` step; the binary path below needs none of them.
       - name: Install host prerequisites
         run: ${{ matrix.setup }}
 
