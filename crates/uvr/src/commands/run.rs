@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 
 use uvr_core::manifest::{DependencySpec, Manifest};
 use uvr_core::project::{ManifestSource, Project};
+use uvr_core::r_env::REnv;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 
 pub async fn run(
@@ -64,46 +65,23 @@ pub async fn run(
         None
     };
 
-    // Build R_LIBS_USER: with-library (if any) prepended to project library,
-    // plus any path supplied via the UVR_EXTRA_LIBS escape hatch. The escape
-    // hatch covers cases where a controlled environment (a Docker image, a
-    // shared lab machine, the bench harness in #40) needs to expose a system
-    // library to `uvr run` without un-isolating the project — without it,
-    // setting R_LIBS_SITE="" below would shadow the system library entirely
-    // and any package installed there (pak / renv / cli / …) becomes
-    // invisible.
-    let path_sep = if cfg!(target_os = "windows") {
-        ";"
-    } else {
-        ":"
+    // The isolated environment — library search path, shadowed system
+    // libraries, and R's runtime lib dir. Built by `uvr_core::r_env` so that
+    // `uvr run` and `uvr activate` export exactly the same set and cannot
+    // drift apart.
+    let r_env = REnv {
+        r_binary,
+        library,
+        with_library,
+        extra_libs: uvr_core::env_vars::extra_libs(),
     };
-    let mut libs_user = match &with_library {
-        Some(with_lib) => format!("{}{path_sep}{}", with_lib.display(), library.display()),
-        None => library.to_string_lossy().into_owned(),
-    };
-    if let Some(extra) = uvr_core::env_vars::extra_libs() {
-        let extra = extra.trim();
-        if !extra.is_empty() {
-            libs_user.push_str(path_sep);
-            libs_user.push_str(extra);
-        }
+
+    let mut cmd = Command::new(&r_env.r_binary);
+    for (key, value) in r_env.vars() {
+        cmd.env(key, value);
     }
-
-    // Derive R's lib directory for DYLD_LIBRARY_PATH so that compiled packages
-    // (e.g. rlang) can find libR.dylib at runtime regardless of its embedded install-name.
-    let r_lib_dir = r_binary
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join("lib"))
-        .unwrap_or_default();
-
-    let mut cmd = Command::new(&r_binary);
-    cmd.env("R_LIBS_USER", &libs_user);
-    cmd.env("R_LIBS_SITE", "");
-    cmd.env("R_LIBS", "");
-    cmd.env("DYLD_LIBRARY_PATH", r_lib_dir.to_string_lossy().as_ref());
-    cmd.env("LD_LIBRARY_PATH", r_lib_dir.to_string_lossy().as_ref());
-    cmd.env("R_ENVIRON", "");
+    // Belt and braces alongside the blank `R_ENVIRON`: a process flag is
+    // available here, but not to a sourced activation script.
     cmd.arg("--no-environ");
 
     if let Some(script_path) = &script {

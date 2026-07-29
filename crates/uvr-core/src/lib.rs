@@ -7,6 +7,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod os_release;
 pub mod project;
+pub mod r_env;
 pub mod r_version;
 pub mod registry;
 pub mod resolver;
