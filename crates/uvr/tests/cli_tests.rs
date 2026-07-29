@@ -644,3 +644,85 @@ fn lock_with_binary_capable_source_records_source_urls() {
         "lockfile should record the source URL from rpkgs-stub: {lock}"
     );
 }
+
+#[test]
+fn test_init_writes_activation_shims() {
+    let dir = init_project("shimproj");
+    for shim in ["activate", "activate.fish", "activate.ps1"] {
+        let path = dir.path().join(".uvr").join(shim);
+        assert!(path.exists(), "{shim} not written by init");
+        let body = fs::read_to_string(&path).unwrap();
+        // The staleness guarantee: shims delegate, never bake in paths.
+        assert!(
+            body.contains("uvr activate --emit"),
+            "{shim} does not delegate to the binary"
+        );
+    }
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert!(
+        gitignore.contains(".uvr/activate*"),
+        "generated shims are not git-ignored: {gitignore}"
+    );
+}
+
+#[test]
+fn test_activate_emit_outside_project_fails() {
+    // Must fail loudly so the shim's `&& eval` leaves the shell untouched.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["activate", "--emit", "sh"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Not inside a uvr project"));
+}
+
+#[test]
+fn test_activate_emit_sh_is_valid_shell() {
+    let dir = init_project("emitproj");
+    let out = uvr_cmd()
+        .args(["activate", "--emit", "sh"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let script = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    // Parse it with a real shell so a syntax error can't ship.
+    let mut sh = Command::new("sh");
+    sh.arg("-n").write_stdin(script.clone()).assert().success();
+
+    assert!(script.contains("R_LIBS_USER="));
+    assert!(script.contains("deactivate()"));
+    // Isolation: both Renviron gates must be blanked, or a user's
+    // ~/.Renviron can re-point R_LIBS_USER out from under the project.
+    assert!(script.contains("R_ENVIRON="));
+    assert!(script.contains("R_ENVIRON_USER="));
+}
+
+#[test]
+fn test_activate_emit_every_shell_succeeds() {
+    let dir = init_project("allshells");
+    for shell in ["sh", "bash", "zsh", "fish", "powershell"] {
+        uvr_cmd()
+            .args(["activate", "--emit", shell])
+            .current_dir(dir.path())
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("R_LIBS_USER"));
+    }
+}
+
+#[test]
+fn test_activate_write_shim_restores_deleted_shims() {
+    let dir = init_project("restoreproj");
+    let fish = dir.path().join(".uvr").join("activate.fish");
+    fs::remove_file(&fish).unwrap();
+    assert!(!fish.exists());
+
+    uvr_cmd()
+        .args(["activate", "--write-shim"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(fish.exists(), "--write-shim did not restore the fish shim");
+}

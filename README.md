@@ -232,6 +232,7 @@ uvr tree
 | `uvr tree --depth 1` | Show only direct dependencies |
 | `uvr run [script.R]` | Run a script (or interactive R) with the project library active |
 | `uvr run --with pkg` | Run with extra packages available (not added to manifest) |
+| `uvr activate` | Print how to activate the project in your shell (`source .uvr/activate`) |
 | `uvr r install <ver>` | Download and install a specific R version to `~/.uvr/r-versions/` |
 | `uvr r list` | Show installed R versions |
 | `uvr r list --all` | Show all available R versions (fetched from the portable build index) |
@@ -247,6 +248,41 @@ uvr tree
 | `uvr cache clean` | Remove all cached package downloads |
 | `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
 | `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
+
+---
+
+## Shell activation
+
+Prefer working in a plain R console over prefixing everything with `uvr run`?
+Activate the project and a bare `R` or `Rscript` uses it:
+
+```sh
+source .uvr/activate      # bash, zsh, sh
+source .uvr/activate.fish # fish
+. .uvr/activate.ps1       # PowerShell
+
+R                         # uses the project's R and .uvr/library/
+deactivate                # restore your shell
+```
+
+`uvr init` writes these files (`uvr activate --write-shim` recreates them).
+They contain **no paths**: each one asks uvr to recompute the environment as
+it is sourced, so changing the project's R version with `uvr r use` or
+`uvr r pin` never leaves a stale activation behind.
+
+To show the project name in your prompt while activated — off by default:
+
+```toml
+# uvr.toml
+[activate]
+prompt = true
+```
+
+or per-shell, which overrides the manifest either way:
+
+```sh
+export UVR_ACTIVATE_PROMPT=1   # or 0 to opt out of a project that opts in
+```
 
 ---
 

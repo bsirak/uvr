@@ -17,17 +17,20 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 
 use uvr_core::project::{Project, DOT_UVR_DIR};
 use uvr_core::r_env::{REnv, PATH_SEP};
 use uvr_core::r_version::detector::find_r_binary;
 
 use crate::ui;
-use crate::ui::palette;
 
-/// Shells `uvr activate --emit` can generate code for. Same set `uvr
-/// completions` supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+/// Shells `uvr activate --emit` can generate code for.
+///
+/// Deliberately not the same set as `uvr completions`: `sh` is here because a
+/// POSIX shim has to name a shell, and `elvish` is not, because nobody has
+/// asked for an activation script for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ActivateShell {
     Sh,
     Bash,
@@ -64,7 +67,7 @@ pub fn run(emit: Option<ActivateShell>, write_shim: bool) -> Result<()> {
         write_shims(&project.root)?;
         ui::success("Wrote activation shims");
         for name in [SHIM_SH, SHIM_FISH, SHIM_PS1] {
-            println!("  {}", palette::dim(format!("{DOT_UVR_DIR}/{name}")));
+            ui::bullet_dim(format!("{DOT_UVR_DIR}/{name}"));
         }
         return Ok(());
     }
@@ -81,9 +84,12 @@ pub fn run(emit: Option<ActivateShell>, write_shim: bool) -> Result<()> {
     if shims_incomplete(&project.root) {
         write_shims(&project.root)?;
     }
-    ui::info(format!(
-        "Activate this project with:\n\n    source {DOT_UVR_DIR}/{SHIM_SH}\n\nThen run `deactivate` to restore your shell."
-    ));
+    // `ui::info` renders a one-line headline; the command and the follow-up go
+    // through bullet/hint rather than being crammed into it as embedded
+    // newlines, which would leave every line but the first unglyphed.
+    ui::info("Activate this project in your shell:");
+    ui::bullet(format!("source {DOT_UVR_DIR}/{SHIM_SH}"));
+    ui::hint("Run `deactivate` to restore your shell.");
     Ok(())
 }
 
@@ -99,8 +105,9 @@ fn shims_incomplete(root: &Path) -> bool {
 }
 
 fn find_project() -> Result<Project> {
-    Project::find_cwd()
-        .map_err(|_| anyhow::anyhow!("Not inside a uvr project — no uvr.toml found."))
+    // `.context` rather than `map_err`, matching every other command: it keeps
+    // the underlying UvrError in the chain instead of discarding it.
+    Project::find_cwd().context("Not inside a uvr project")
 }
 
 /// Resolve the project name and its isolated environment.
@@ -421,6 +428,12 @@ pub fn write_shims(root: &Path) -> Result<()> {
         std::fs::write(dir.join(name), body)
             .with_context(|| format!("Failed to write {DOT_UVR_DIR}/{name}"))?;
     }
+    // Generated files must not be committed. Done here rather than only in
+    // `uvr init` so `--write-shim` and the backfill path can't produce
+    // untracked-but-unignored shims in a project created by an older uvr.
+    // Idempotent — it skips entries already present.
+    crate::commands::init::write_gitignore(root)
+        .context("Failed to update .gitignore for activation shims")?;
     Ok(())
 }
 
