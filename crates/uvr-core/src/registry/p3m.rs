@@ -343,7 +343,7 @@ fn platform_info(
             // own server, which doesn't serve Linux binaries today; Bioc on
             // Linux falls back to source as before.
             let slug = posit_distro_slug?;
-            let codename = ppm_linux_codename(slug)?;
+            let codename = ppm_linux_repo(slug)?;
             let arch = if matches!(platform, Platform::LinuxX86_64) {
                 "x86_64"
             } else {
@@ -393,15 +393,35 @@ pub fn ppm_linux_codename(posit_slug: &str) -> Option<&'static str> {
         "ubuntu-2004" => Some("focal"),
         "ubuntu-2204" => Some("jammy"),
         "ubuntu-2404" => Some("noble"),
+        "ubuntu-2604" => Some("resolute"),
         "debian-11" => Some("bullseye"),
         "debian-12" => Some("bookworm"),
+        "debian-13" => Some("trixie"),
         "rhel-7" | "centos-7" => Some("centos7"),
         "rhel-8" | "centos-8" => Some("centos8"),
         "rhel-9" | "centos-9" => Some("rhel9"),
+        "rhel-10" | "centos-10" => Some("rhel10"),
         "opensuse-154" => Some("opensuse154"),
         "opensuse-155" => Some("opensuse155"),
+        "opensuse-156" => Some("opensuse156"),
         _ => None,
     }
+}
+
+/// The P3M Linux repo to install binaries from on this host.
+///
+/// Prefers the distro's own repo — those binaries link the system libraries
+/// and are what Posit builds for. Falls back to the portable
+/// `manylinux_2_28` repo, whose binaries vendor their dependencies and so
+/// work on distros Posit doesn't publish for (Arch, Fedora, NixOS, Gentoo).
+///
+/// `None` means no binaries are usable here at all — musl, glibc older than
+/// 2.28 — and the caller compiles from source.
+///
+/// Unlike [`ppm_linux_codename`] this inspects the host, so it is not a pure
+/// function of the slug; that mapping stays pure for tests.
+pub fn ppm_linux_repo(posit_slug: &str) -> Option<&'static str> {
+    ppm_linux_codename(posit_slug).or_else(crate::r_version::downloader::ppm_manylinux_repo)
 }
 
 fn cache_path(r_minor: &str, key: &str) -> PathBuf {
@@ -566,12 +586,68 @@ Version: 1.1.4
     }
 
     #[test]
-    fn platform_info_linux_unknown_distro_none() {
-        // Slackware isn't on PPM — falls back to None (source-only).
-        assert!(platform_info(Platform::LinuxX86_64, Some("slackware-15"), "4.5").is_none());
-        assert!(platform_info(Platform::LinuxArm64, Some("nixos-2411"), "4.5").is_none());
-        // Without a slug, we can't translate.
+    fn platform_info_linux_unknown_distro_uses_manylinux_or_source() {
+        // A distro PPM doesn't publish for no longer resolves to its own
+        // repo. What happens next depends on the host: on glibc >= 2.28 the
+        // portable manylinux repo applies, otherwise there are no usable
+        // binaries and the caller compiles from source. Assert the property
+        // rather than one host's answer, so this passes on every runner.
+        for slug in ["slackware-15", "nixos-2411"] {
+            let info = platform_info(Platform::LinuxX86_64, Some(slug), "4.5");
+            match crate::r_version::downloader::ppm_manylinux_repo() {
+                Some(repo) => {
+                    let info = info.expect("manylinux host should still get a repo");
+                    assert_eq!(info.linux_codename.as_deref(), Some(repo));
+                }
+                None => assert!(info.is_none(), "no binaries usable, expected source-only"),
+            }
+        }
+        // Without a slug there is nothing to translate, on any host.
         assert!(platform_info(Platform::LinuxX86_64, None, "4.5").is_none());
+    }
+
+    #[test]
+    fn ppm_linux_codename_stays_pure() {
+        // The slug→codename mapping must not consult the host; only
+        // `ppm_linux_repo` does. Guards the split that keeps this testable.
+        assert_eq!(ppm_linux_codename("slackware-15"), None);
+        assert_eq!(ppm_linux_codename("arch"), None);
+        assert_eq!(ppm_linux_codename("unknown"), None);
+    }
+
+    #[test]
+    fn ppm_linux_codename_covers_every_repo_posit_publishes() {
+        // Every Linux repo currently offered by the distro dropdown on
+        // https://packagemanager.posit.co/client/#/repos/cran/setup. A
+        // missing entry silently downgrades that distro's users to source
+        // builds, which is easy to ship and hard to notice.
+        for (slug, codename) in [
+            ("ubuntu-2204", "jammy"),
+            ("ubuntu-2404", "noble"),
+            ("ubuntu-2604", "resolute"),
+            ("debian-12", "bookworm"),
+            ("debian-13", "trixie"),
+            ("rhel-7", "centos7"),
+            ("rhel-8", "centos8"),
+            ("rhel-9", "rhel9"),
+            ("rhel-10", "rhel10"),
+            ("opensuse-156", "opensuse156"),
+        ] {
+            assert_eq!(ppm_linux_codename(slug), Some(codename), "slug {slug}");
+        }
+        // manylinux_2_28 is not keyed by slug — it is the host-dependent
+        // fallback in `ppm_linux_repo`.
+
+        // Retired from the dropdown but still served, so users on EOL
+        // systems keep their binaries rather than silently losing them.
+        for (slug, codename) in [
+            ("ubuntu-2004", "focal"),
+            ("debian-11", "bullseye"),
+            ("opensuse-154", "opensuse154"),
+            ("opensuse-155", "opensuse155"),
+        ] {
+            assert_eq!(ppm_linux_codename(slug), Some(codename), "legacy {slug}");
+        }
     }
 
     #[test]

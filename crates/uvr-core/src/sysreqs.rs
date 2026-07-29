@@ -16,21 +16,16 @@ pub struct SysReq {
 /// Detect the Linux distribution from `/etc/os-release`.
 /// Returns `(id, version_id)` like `("ubuntu", "22.04")`.
 pub fn detect_linux_distro() -> Option<String> {
-    let content = std::fs::read_to_string("/etc/os-release").ok()?;
-    let mut id = None;
-    let mut version_id = None;
-
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix("ID=") {
-            id = Some(val.trim_matches('"').to_string());
-        } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
-            version_id = Some(val.trim_matches('"').to_string());
-        }
+    let os = crate::os_release::detect()?;
+    // Both halves are required here, unlike P3M slug detection: the sysreqs
+    // API and the vendored rules are keyed by `id-version`, and there is no
+    // sensible query for a rolling release that publishes no version. Arch
+    // and CachyOS land here and the caller skips the check — the safe
+    // direction to fail, since a wrong answer only produces a wrong hint.
+    if os.id.is_empty() || os.version_id.is_empty() {
+        return None;
     }
-
-    let id = id?;
-    let version_id = version_id?;
-    Some(format!("{id}-{version_id}"))
+    Some(format!("{}-{}", os.id, os.version_id))
 }
 
 /// Response from the Posit Package Manager sysreqs API.
@@ -312,13 +307,44 @@ mod tests {
 
     #[test]
     fn filter_missing_with_nonexistent_package() {
-        if cfg!(target_os = "linux") {
-            let reqs = vec![SysReq {
-                package: "uvr-nonexistent-pkg-12345".to_string(),
-            }];
-            let missing = filter_missing(&reqs);
-            assert_eq!(missing.len(), 1);
+        if !cfg!(target_os = "linux") {
+            return;
         }
+        // `filter_missing` documents itself as a no-op without dpkg/rpm/apk,
+        // so asserting it reports something requires one of them to exist.
+        // The test used to assume every Linux has one and failed on Arch,
+        // NixOS, Gentoo and friends — a false alarm for anyone developing
+        // uvr there.
+        if which::which("dpkg").is_err()
+            && which::which("rpm").is_err()
+            && which::which("apk").is_err()
+        {
+            eprintln!("skipping: no dpkg/rpm/apk on this system");
+            return;
+        }
+        let reqs = vec![SysReq {
+            package: "uvr-nonexistent-pkg-12345".to_string(),
+        }];
+        let missing = filter_missing(&reqs);
+        assert_eq!(missing.len(), 1);
+    }
+
+    #[test]
+    fn filter_missing_is_a_no_op_without_a_package_manager() {
+        // The other half of the contract: with no supported package manager
+        // we report nothing missing rather than guessing. Callers must treat
+        // that as "unverified", not "verified clean" — see `check_system_deps`.
+        if which::which("dpkg").is_ok()
+            || which::which("rpm").is_ok()
+            || which::which("apk").is_ok()
+        {
+            eprintln!("skipping: a supported package manager is present");
+            return;
+        }
+        let reqs = vec![SysReq {
+            package: "uvr-nonexistent-pkg-12345".to_string(),
+        }];
+        assert!(filter_missing(&reqs).is_empty());
     }
 
     #[test]

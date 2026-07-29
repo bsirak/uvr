@@ -7,6 +7,30 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Unknown Linux distros no longer install incompatible binaries** (#175):
+  uvr treated any unrecognized distro as Ubuntu 22.04 and installed P3M's
+  jammy binaries. On Arch those link `libxml2.so.2` against a system shipping
+  `libxml2.so.16` — the install "succeeded" in seconds and every affected
+  package failed at `library()`. An unrecognized distro now reports itself and
+  no per-distro repo matches.
+- **Portable `manylinux_2_28` binaries on distros Posit doesn't publish for**
+  (#175): rather than falling back to source, uvr now uses P3M's portable
+  manylinux repo, whose binaries vendor their own shared libraries. Arch,
+  Fedora, NixOS and Gentoo get binary installs (~5s) instead of source builds
+  (~45s). Requires glibc >= 2.28; musl and older glibc still build from source.
+- **New P3M repos**: Ubuntu 26.04 (`resolute`), Debian 13 (`trixie`),
+  RHEL/Rocky 10 (`rhel10`), openSUSE 15.6 (`opensuse156`). Users on those
+  distros were silently compiling everything from source.
+- **`uvr add --no-binary` / `uvr sync --no-binary`** (also `UVR_NO_BINARY=1`):
+  build everything from source, ignoring pre-built binaries — an escape hatch
+  for a binary that doesn't suit the host, including opting out of the preview
+  manylinux repo.
+- Binary cache entries now record which repo they came from, so a jammy build
+  and a manylinux build of the same package can't collide. Without this, a
+  machine that already cached a wrong-distro binary would keep reusing it.
+- The system-dependency check and P3M distro detection now share one parse of
+  `/etc/os-release`; they previously disagreed on whether `VERSION_ID` was
+  required, and a test assumed every Linux has dpkg/rpm/apk (it fails on Arch).
 - **GitLab-hosted package support** (#123, PR #174 by @pteridin): `uvr add gitlab::host/group/repo[@ref]` resolves via the GitLab API v4, mirroring the existing `forgejo::` support — self-hosted instances included, nested groups handled via URL-encoded project paths. Flows through lockfile, `uvr export`, and sync.
 - Cache filenames derived from download URLs strip query strings/fragments — GitLab archive URLs carry `?sha=...`, and `?` is an illegal filename character on Windows (os error 123). (PR #174)
 - `R CMD INSTALL` failure logs now combine stdout and stderr instead of picking one stream — R splits progress and the actual error across both inconsistently. (PR #174)

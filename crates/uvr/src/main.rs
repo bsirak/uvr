@@ -92,6 +92,9 @@ async fn run() -> Result<()> {
             if args.install_system_deps {
                 std::env::set_var("UVR_INSTALL_SYSREQS", "1");
             }
+            if args.no_binary {
+                std::env::set_var("UVR_NO_BINARY", "1");
+            }
             commands::add::run(
                 args.packages,
                 args.dev,
@@ -118,6 +121,9 @@ async fn run() -> Result<()> {
             }
             if args.ignore_cache {
                 std::env::set_var("UVR_IGNORE_CACHE", "1");
+            }
+            if args.no_binary {
+                std::env::set_var("UVR_NO_BINARY", "1");
             }
             commands::sync::run(args.frozen, args.no_dev, args.jobs, args.library, timeout).await?;
         }

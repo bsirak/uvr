@@ -735,6 +735,7 @@ async fn install_from_lockfile_with_r(
     let bioc_release = lockfile.r.bioc_version.as_deref();
 
     // ── Phase 1: check global package cache ──────────────────────────────
+    // (see `binary_packages_usable` below for the binary-entry gate)
     // Packages found in the cache are cloned into the library instantly
     // (CoW on APFS, recursive copy elsewhere) — no download or extraction.
     // This runs BEFORE the P3M index fetch so a fully-cached sync skips
@@ -749,6 +750,21 @@ async fn install_from_lockfile_with_r(
     let mut cache_misses: Vec<&LockedPackage> = Vec::new();
     let mut cache_hit_count = 0usize;
     let ignore_cache = cache_lookup_disabled();
+    // Whether a cached *binary* entry is usable here at all — see
+    // `package_cache::lookup_any`.
+    let force_source = source_installs_forced();
+    if force_source {
+        ui::bullet_dim("Building from source (--no-binary / UVR_NO_BINARY).");
+    }
+    let binary_flavor: Option<String> = if force_source {
+        None
+    } else {
+        binary_repo_flavor()
+    };
+    // A cached *binary* is not eligible when the user asked for source
+    // builds — serving one would silently defeat the flag.
+    let binary_cache_allowed =
+        !force_source && (binary_flavor.is_some() || !cfg!(target_os = "linux"));
     if ignore_cache {
         ui::bullet_dim("Ignoring package cache (--ignore-cache / UVR_IGNORE_CACHE).");
     }
@@ -763,8 +779,9 @@ async fn install_from_lockfile_with_r(
             &pkg.version,
             pkg.checksum.as_deref(),
             &r_minor_str,
-            true, // probe binary key first
+            binary_cache_allowed,
             libr_path.as_deref(),
+            binary_flavor.as_deref(),
         ) {
             match package_cache::clone_to_library(&cached_dir, &library, &pkg.name) {
                 Ok(()) => {
@@ -833,7 +850,10 @@ async fn install_from_lockfile_with_r(
 
         // (C) decision: any binary-capable custom source fully replaces P3M
         // for this sync. P3M is not consulted at all.
-        let p3m = if custom_binary.is_empty() {
+        let p3m = if force_source {
+            // Nothing to consult: every package takes the source path below.
+            None
+        } else if custom_binary.is_empty() {
             match detected_platform {
                 Ok(platform) => {
                     let slug = if matches!(platform, Platform::LinuxX86_64 | Platform::LinuxArm64) {
@@ -1088,6 +1108,7 @@ async fn install_from_lockfile_with_r(
                 &r_minor_str,
                 cache_key_binary,
                 libr_path.as_deref(),
+                binary_flavor.as_deref(),
             );
             let pkg_dir = library.join(&plan.pkg.name);
             // Recorded inside the entry so `uvr cache clean --r-version` can
@@ -1436,6 +1457,42 @@ fn r_minor(version: &str) -> String {
     } else {
         version.to_string()
     }
+}
+
+/// Whether pre-built binary packages are usable on this machine at all.
+///
+/// macOS and Windows binaries are not distro-specific, so they always are.
+/// On Linux it depends on whether Posit publishes for this distro: when no
+/// PPM codename matches, any binary sitting in the package cache is a
+/// leftover from a uvr that mis-identified the distro (#175). It links
+/// shared libraries this system does not have and fails at `library()`, so
+/// only source-built entries may be reused.
+///
+/// Cheap — reads `/etc/os-release`, no network.
+fn binary_repo_flavor() -> Option<String> {
+    match Platform::detect() {
+        Ok(Platform::LinuxX86_64) | Ok(Platform::LinuxArm64) => {
+            let slug = uvr_core::r_version::downloader::detect_posit_distro_slug();
+            uvr_core::registry::p3m::ppm_linux_repo(&slug).map(str::to_string)
+        }
+        // macOS/Windows binaries are not repo-specific, so they need no
+        // flavour in the cache key — and keeping it `None` there leaves those
+        // keys byte-identical to before this change.
+        _ => None,
+    }
+}
+
+/// `--no-binary` flag or `UVR_NO_BINARY=1` env var: build everything from
+/// source, ignoring pre-built binaries.
+///
+/// The escape hatch for a binary that doesn't suit the host — including
+/// opting out of the preview portable `manylinux` repo — without having to
+/// pin a different distro.
+fn source_installs_forced() -> bool {
+    matches!(
+        std::env::var("UVR_NO_BINARY").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("TRUE") | Some("YES")
+    )
 }
 
 /// `--ignore-cache` flag or `UVR_IGNORE_CACHE=1` env var (#93).

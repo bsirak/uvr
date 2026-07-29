@@ -165,6 +165,11 @@ pub struct AddArgs {
     /// prompted for confirmation; non-TTY runs (CI) proceed without.
     #[arg(long)]
     pub install_system_deps: bool,
+
+    /// Build every package from source, ignoring pre-built binaries.
+    /// Also enabled by `UVR_NO_BINARY=1`.
+    #[arg(long)]
+    pub no_binary: bool,
 }
 
 // ────────────────────────────────────────────────────────────
@@ -224,6 +229,13 @@ pub struct SyncArgs {
     /// syncs benefit again.
     #[arg(long)]
     pub ignore_cache: bool,
+
+    /// Build every package from source, ignoring pre-built binaries.
+    /// Also enabled by `UVR_NO_BINARY=1`. Useful when a binary repo serves
+    /// a build that doesn't suit the host, or to opt out of the preview
+    /// portable `manylinux` repo.
+    #[arg(long)]
+    pub no_binary: bool,
 }
 
 // ────────────────────────────────────────────────────────────
