@@ -77,6 +77,9 @@ pub fn run(name: Option<String>, here: bool, r_version: Option<String>) -> Resul
     // Write .gitignore
     write_gitignore(&cwd).context("Failed to write .gitignore")?;
 
+    // Write the `source .uvr/activate` shim
+    crate::commands::activate::write_shims(&cwd).context("Failed to write activation shim")?;
+
     // Add uvr files to .Rbuildignore only for actual R package source trees
     // (DESCRIPTION with a `Package:` field). Non-package projects may still
     // carry a DESCRIPTION for dependency tracking.
@@ -445,23 +448,35 @@ pub fn write_rbuildignore(dir: &Path) -> std::io::Result<()> {
 
 pub fn write_gitignore(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".gitignore");
-    let uvr_entry = format!("/{DOT_UVR_DIR}/{LIBRARY_DIR}/");
+    // The library is downloaded and the activation shims are generated —
+    // neither belongs in version control.
+    let wanted = [
+        format!("/{DOT_UVR_DIR}/{LIBRARY_DIR}/"),
+        format!("/{DOT_UVR_DIR}/activate*"),
+    ];
 
-    if path.exists() {
-        let existing = std::fs::read_to_string(&path)?;
-        if line_already_present(&existing, &uvr_entry) {
-            return Ok(());
-        }
-        let mut content = existing;
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(&uvr_entry);
-        content.push('\n');
-        std::fs::write(&path, content)
-    } else {
-        std::fs::write(&path, format!("{uvr_entry}\n"))
+    if !path.exists() {
+        let body = wanted.iter().map(|s| format!("{s}\n")).collect::<String>();
+        return std::fs::write(&path, body);
     }
+
+    let existing = std::fs::read_to_string(&path)?;
+    let missing: Vec<&String> = wanted
+        .iter()
+        .filter(|w| !line_already_present(&existing, w))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut content = existing;
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    for entry in missing {
+        content.push_str(entry);
+        content.push('\n');
+    }
+    std::fs::write(&path, content)
 }
 
 /// True if `entry` is already present in `existing` as a non-comment line,

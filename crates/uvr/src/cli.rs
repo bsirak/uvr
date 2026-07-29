@@ -4,6 +4,7 @@ use clap::builder::styling;
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
+use crate::commands::activate::ActivateShell;
 use crate::commands::export::ExportFormat;
 
 /// Match the runtime palette: cyan accents for headers/usage, magenta for
@@ -53,6 +54,9 @@ pub enum Commands {
 
     /// Run an R script within the project environment
     Run(RunArgs),
+
+    /// Print how to activate this project in your shell (`source .uvr/activate`)
+    Activate(ActivateArgs),
 
     /// Update packages to their latest allowed versions
     Update(UpdateArgs),
@@ -259,6 +263,22 @@ pub struct RunArgs {
     /// Arguments forwarded to the script
     #[arg(last = true)]
     pub args: Vec<String>,
+}
+
+// ────────────────────────────────────────────────────────────
+//  activate
+// ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Args)]
+pub struct ActivateArgs {
+    /// Print shell statements to stdout for SHELL. Used by the generated
+    /// `.uvr/activate` shim — source that instead of calling this directly.
+    #[arg(long, value_name = "SHELL")]
+    pub emit: Option<ActivateShell>,
+
+    /// (Re)write the `.uvr/activate` shim and exit.
+    #[arg(long)]
+    pub write_shim: bool,
 }
 
 // ────────────────────────────────────────────────────────────

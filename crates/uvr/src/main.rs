@@ -130,6 +130,9 @@ async fn run() -> Result<()> {
         Commands::Run(args) => {
             commands::run::run(args.script, args.r_version, args.with_packages, args.args).await?;
         }
+        Commands::Activate(args) => {
+            commands::activate::run(args.emit, args.write_shim)?;
+        }
         Commands::Update(args) => {
             commands::update::run(args.packages, args.dry_run, args.jobs).await?;
         }
