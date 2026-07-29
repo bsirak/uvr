@@ -10,7 +10,11 @@
 use std::path::{Path, PathBuf};
 
 /// The OS path-list separator (`;` on Windows, `:` elsewhere).
-pub const PATH_SEP: &str = if cfg!(target_os = "windows") { ";" } else { ":" };
+pub const PATH_SEP: &str = if cfg!(target_os = "windows") {
+    ";"
+} else {
+    ":"
+};
 
 /// A resolved, isolated R environment.
 ///
@@ -33,7 +37,10 @@ impl REnv {
     /// Directory holding the R binary — what activation prepends to `PATH`
     /// so a bare `R` resolves to this interpreter.
     pub fn r_bin_dir(&self) -> PathBuf {
-        self.r_binary.parent().map(Path::to_path_buf).unwrap_or_default()
+        self.r_binary
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
     }
 
     /// R's own `lib/` directory, i.e. `<r_binary>/../../lib`.

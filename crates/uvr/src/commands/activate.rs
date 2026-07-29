@@ -105,13 +105,7 @@ fn resolve() -> Result<(String, REnv, bool)> {
     // Env var wins over the manifest, so a user can opt out of a project
     // that opts in (and vice versa) without editing a shared file.
     let prompt = uvr_core::env_vars::activate_prompt()
-        .or_else(|| {
-            project
-                .manifest
-                .activate
-                .as_ref()
-                .and_then(|a| a.prompt)
-        })
+        .or_else(|| project.manifest.activate.as_ref().and_then(|a| a.prompt))
         .unwrap_or(false);
 
     // Matches `uvr run`: the constraint comes from uvr.toml, and
@@ -241,10 +235,7 @@ fn emit_fish(project: &str, env: &REnv, prompt: bool) -> String {
     for (name, value) in env.vars() {
         out.push_str(&format!("set -gx {name} {}\n", fish_quote(&value)));
     }
-    out.push_str(&format!(
-        "set -gx UVR_PROJECT {}\n",
-        fish_quote(project)
-    ));
+    out.push_str(&format!("set -gx UVR_PROJECT {}\n", fish_quote(project)));
 
     // fish builds its prompt from a `fish_prompt` function, not a variable,
     // so the old one is copied aside and delegated to.
@@ -397,8 +388,7 @@ if (-not (Get-Command uvr -ErrorAction SilentlyContinue)) {
 /// `uvr init`.
 pub fn write_shims(root: &Path) -> Result<()> {
     let dir = root.join(DOT_UVR_DIR);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("Failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
     for (name, body) in [
         (SHIM_SH, SHIM_SH_BODY),
         (SHIM_FISH, SHIM_FISH_BODY),
@@ -473,7 +463,8 @@ mod tests {
 
     #[test]
     fn posix_exports_the_project_name() {
-        assert!(emit_posix("my-proj", &env(), false).contains("UVR_PROJECT='my-proj'; export UVR_PROJECT"));
+        assert!(emit_posix("my-proj", &env(), false)
+            .contains("UVR_PROJECT='my-proj'; export UVR_PROJECT"));
     }
 
     #[test]
@@ -527,7 +518,10 @@ mod tests {
         let out = emit_fish("demo", &env, false);
         // fish PATH is a real list — prepend as a list element, not by
         // splicing a separator into a string.
-        assert!(out.contains("set -gx PATH '/opt/R/4.4.2/bin' $PATH"), "{out}");
+        assert!(
+            out.contains("set -gx PATH '/opt/R/4.4.2/bin' $PATH"),
+            "{out}"
+        );
         for (name, value) in env.vars() {
             assert!(
                 out.contains(&format!("set -gx {name} {}", fish_quote(&value))),
@@ -544,7 +538,9 @@ mod tests {
         let env = env();
         let out = emit_powershell("demo", &env, false);
         assert!(
-            out.contains(&format!("$env:PATH = '/opt/R/4.4.2/bin' + '{PATH_SEP}' + $env:PATH")),
+            out.contains(&format!(
+                "$env:PATH = '/opt/R/4.4.2/bin' + '{PATH_SEP}' + $env:PATH"
+            )),
             "{out}"
         );
         for (name, value) in env.vars() {
@@ -591,11 +587,17 @@ mod tests {
     #[test]
     fn posix_prompt_prefixes_and_restores_ps1() {
         let out = emit_posix("demo", &env(), true);
-        assert!(out.contains(r#"PS1='(demo) '"${PS1-}"; export PS1"#), "{out}");
+        assert!(
+            out.contains(r#"PS1='(demo) '"${PS1-}"; export PS1"#),
+            "{out}"
+        );
         // Saved before it is modified, and restored on the way out.
         assert!(out.contains(r#"UVR_OLD_PS1="${PS1-}""#));
         assert!(out.contains(r#"if [ -n "${UVR_OLD_PS1_SET-}" ]; then PS1="${UVR_OLD_PS1-}""#));
-        assert!(out.contains("unset UVR_OLD_PS1 UVR_OLD_PS1_SET") || out.contains("UVR_OLD_PS1 UVR_OLD_PS1_SET"));
+        assert!(
+            out.contains("unset UVR_OLD_PS1 UVR_OLD_PS1_SET")
+                || out.contains("UVR_OLD_PS1 UVR_OLD_PS1_SET")
+        );
     }
 
     #[test]
@@ -613,7 +615,10 @@ mod tests {
         // fish has no PS1 — the prompt is a function, so the old one is
         // copied aside and delegated to.
         let out = emit_fish("demo", &env(), true);
-        assert!(out.contains("functions -c fish_prompt _uvr_old_fish_prompt"), "{out}");
+        assert!(
+            out.contains("functions -c fish_prompt _uvr_old_fish_prompt"),
+            "{out}"
+        );
         assert!(out.contains("function fish_prompt"));
         assert!(out.contains(r"printf '%s' '(demo) '"));
         assert!(out.contains("functions -c _uvr_old_fish_prompt fish_prompt"));
@@ -623,7 +628,10 @@ mod tests {
     #[test]
     fn powershell_prompt_wraps_and_restores_the_prompt_function() {
         let out = emit_powershell("demo", &env(), true);
-        assert!(out.contains("$Global:_UVR_OLD_PROMPT = $function:prompt"), "{out}");
+        assert!(
+            out.contains("$Global:_UVR_OLD_PROMPT = $function:prompt"),
+            "{out}"
+        );
         assert!(out.contains("function global:prompt { '(demo) ' + (& $Global:_UVR_OLD_PROMPT) }"));
         assert!(out.contains("Set-Item Function:global:prompt $Global:_UVR_OLD_PROMPT"));
     }
