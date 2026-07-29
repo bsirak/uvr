@@ -211,6 +211,122 @@ jobs:
             "$bin" r list --all
           '
 
+  # Binary-repo selection across distros (#175).
+  #
+  # The `test` matrix above only runs on distros P3M publishes for, so it
+  # cannot catch uvr choosing a repo whose binaries don't load here. Nor can
+  # SMOKE_PKG: jsonlite links only libR and libc, so it loads no matter which
+  # distro's binary you install. #175 needed a package with an *external*
+  # system library — xml2 pulls libxml2, and that is exactly how it surfaced
+  # (jammy binaries want libxml2.so.2; Arch ships .so.16).
+  #
+  # One static binary is built and reused so each container only runs uvr.
+  build-static:
+    name: Build static uvr (distro matrix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # Static: runs on any glibc distro regardless of its version. uvr's own
+      # libc/distro detection is all runtime (os-release, getconf), so a musl
+      # build still identifies the glibc host correctly.
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-musl --bin uvr
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uvr-static
+          path: target/x86_64-unknown-linux-musl/release/uvr
+          retention-days: 1
+
+  test-distros:
+    name: Distro (${{ matrix.name }})
+    needs: build-static
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Not published by P3M — must degrade to the portable repo, NOT
+          # claim to be Ubuntu (#175) and not silently drop to source.
+          - name: arch (unmapped)
+            image: archlinux:latest
+            expect: manylinux_2_28
+            setup: pacman -Sy --noconfirm --needed gcc make which fontconfig ca-certificates libxml2
+          - name: fedora (unmapped)
+            image: fedora:42
+            expect: manylinux_2_28
+            setup: dnf -y install gcc make which fontconfig ca-certificates libxml2-devel
+          # Repos uvr previously did not map, so these users compiled everything.
+          - name: debian 13 (trixie)
+            image: debian:trixie
+            expect: trixie
+            setup: apt-get update && apt-get install -y --no-install-recommends gcc make ca-certificates fontconfig libxml2-dev
+          - name: rocky 10 (rhel10)
+            image: rockylinux/rockylinux:10
+            expect: rhel10
+            setup: dnf -y install gcc make which fontconfig ca-certificates libxml2-devel
+    steps:
+      - name: Install host prerequisites
+        run: ${{ matrix.setup }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: uvr-static
+
+      - name: Prepare uvr
+        run: |
+          set -eux
+          install -m 0755 uvr /usr/local/bin/uvr
+          uvr --version
+
+      # The assertion that would have caught #175: uvr must pick the repo this
+      # distro can actually run, not the one it guessed.
+      - name: Binary repo selection
+        run: |
+          set -eux
+          uvr doctor | tee doctor.txt
+          grep -q "${{ matrix.expect }}" doctor.txt
+
+      - name: Install R
+        run: uvr r install "${R_VERSIONS##* }"
+
+      # Install a package with an external system-library dependency and load
+      # it. A wrong-repo binary installs fine and only fails here.
+      - name: Install and load xml2
+        run: |
+          set -eux
+          mkdir -p /tmp/distro-smoke && cd /tmp/distro-smoke
+          uvr init --here distro-smoke --r-version "${R_VERSIONS##* }"
+          printf 'library(xml2); stopifnot(xml_text(xml_find_first(read_xml("<a><b>ok</b></a>"), "//b")) == "ok"); cat("distro-smoke-ok\\n")\n' > check.R
+          uvr add xml2
+          uvr run check.R
+
+      # The escape hatch must still produce a working package.
+      - name: Force source build
+        run: |
+          set -eux
+          mkdir -p /tmp/src-smoke && cd /tmp/src-smoke
+          uvr init --here src-smoke --r-version "${R_VERSIONS##* }"
+          printf 'library(xml2); cat("source-smoke-ok\\n")\n' > check.R
+          uvr add xml2 --no-binary
+          uvr run check.R
+
+  # Guards the slug -> P3M repo table against drift: Posit adds repos as
+  # distros ship and retires them at EOL, and both directions fail silently.
+  test-p3m-repos:
+    name: P3M repo coverage (live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check every mapped repo still serves
+        run: cargo test -p uvr-core --test p3m_repos_live -- --ignored --nocapture
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest
