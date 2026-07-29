@@ -91,6 +91,22 @@ pub fn progress() -> Option<String> {
     read_env_var("UVR_PROGRESS")
 }
 
+/// UVR_ACTIVATE_PROMPT
+///
+/// Controls whether `source .uvr/activate` prefixes the shell prompt with the
+/// project name. Accepts `1`/`true`/`yes` to enable and `0`/`false`/`no` to
+/// disable; anything else is ignored. Overrides `[activate] prompt` in
+/// `uvr.toml`, so a user can opt out of a project that opts in.
+/// Defaults to disabled.
+pub fn activate_prompt() -> Option<bool> {
+    let raw = read_env_var("UVR_ACTIVATE_PROMPT")?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 /// UVR_R_INSTALL_DIR
 ///
 /// Gets the directory where uvr-managed R versions are installed.
