@@ -78,13 +78,24 @@ pub fn run(emit: Option<ActivateShell>, write_shim: bool) -> Result<()> {
     // No flags: tell a human what to type. Emitting shell code here would be
     // hostile — the user would get a wall of exports printed to the terminal.
     let project = find_project()?;
-    if !project.root.join(DOT_UVR_DIR).join(SHIM_SH).exists() {
+    if shims_incomplete(&project.root) {
         write_shims(&project.root)?;
     }
     ui::info(format!(
         "Activate this project with:\n\n    source {DOT_UVR_DIR}/{SHIM_SH}\n\nThen run `deactivate` to restore your shell."
     ));
     Ok(())
+}
+
+/// True when any shim is missing from `<root>/.uvr/`.
+///
+/// Checks all three rather than just the POSIX one: a project initialized by
+/// an older uvr has `.uvr/activate` alone, and testing only that would leave
+/// those users with no fish or PowerShell shim to source.
+fn shims_incomplete(root: &Path) -> bool {
+    [SHIM_SH, SHIM_FISH, SHIM_PS1]
+        .iter()
+        .any(|name| !root.join(DOT_UVR_DIR).join(name).exists())
 }
 
 fn find_project() -> Result<Project> {
@@ -572,6 +583,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_project_missing_only_the_newer_shims_is_backfilled() {
+        // A project initialized before fish/PowerShell support has just
+        // `.uvr/activate`; checking that one alone would strand those users.
+        let tmp = tempfile::tempdir().unwrap();
+        write_shims(tmp.path()).unwrap();
+        assert!(!shims_incomplete(tmp.path()));
+
+        std::fs::remove_file(tmp.path().join(DOT_UVR_DIR).join(SHIM_FISH)).unwrap();
+        assert!(
+            shims_incomplete(tmp.path()),
+            "missing fish shim not noticed"
+        );
+
+        write_shims(tmp.path()).unwrap();
+        assert!(!shims_incomplete(tmp.path()));
     }
 
     #[test]
