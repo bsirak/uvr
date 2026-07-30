@@ -561,7 +561,7 @@ impl PackageRegistry for CranRegistry {
 }
 
 fn cache_dir() -> PathBuf {
-    crate::env_vars::cache_dir().unwrap_or_else(|| PathBuf::from("."))
+    crate::env_vars::cache_dir_or_temp()
 }
 pub(crate) fn cache_path_for(key: &str) -> PathBuf {
     cache_dir().join(format!("{key}-packages.txt"))

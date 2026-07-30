@@ -17,6 +17,22 @@ pub fn cache_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".uvr").join("cache"))
 }
 
+/// Like [`cache_dir`], but never returns `None`: in a HOME-less environment
+/// (sandboxed/scratch containers, some CI runners) it degrades to a
+/// `uvr-cache` directory under the system temp dir. Callers used to fall
+/// back to `PathBuf::from(".")` instead, scattering cache files into the
+/// project/working directory (#161).
+pub fn cache_dir_or_temp() -> PathBuf {
+    cache_dir().unwrap_or_else(|| {
+        let fallback = std::env::temp_dir().join("uvr-cache");
+        tracing::warn!(
+            "HOME and UVR_CACHE_DIR are unset; using temporary cache at {}",
+            fallback.display()
+        );
+        fallback
+    })
+}
+
 /// UVR_EXTRA_LIBS
 ///
 /// Allows providing a list of extra R library paths that will be appended
@@ -279,6 +295,23 @@ mod tests {
             env::set_var(var, "   ");
         }
         assert_eq!(extra_libs(), None);
+    }
+
+    // #161: the last-resort cache location must never be the working
+    // directory. Whatever cache_dir_or_temp resolves to (env override, home,
+    // or the temp-dir fallback), it is an absolute path — never `.`.
+    #[test]
+    fn test_cache_dir_or_temp_never_pollutes_cwd() {
+        let _env = env_lock();
+        let _guard = EnvGuard::new(&["UVR_CACHE_DIR"]);
+
+        let resolved = cache_dir_or_temp();
+        assert!(resolved.is_absolute());
+        assert_ne!(resolved, PathBuf::from("."));
+
+        // Explicit override still wins.
+        env::set_var("UVR_CACHE_DIR", "/custom/cache");
+        assert_eq!(cache_dir_or_temp(), PathBuf::from("/custom/cache"));
     }
 
     // All repos() checks run in a single test to avoid race conditions with

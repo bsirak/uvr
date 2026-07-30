@@ -811,12 +811,69 @@ fn extract_tar_gz_to(bytes: &[u8], dest: &Path) -> Result<()> {
 }
 
 /// Extract a `.zip` into `dest` (Windows portable builds).
+///
+/// Validates every entry against path traversal (zip-slip) before writing,
+/// mirroring the package-install path in `installer::binary_install`: entries
+/// with absolute paths or `..` components are rejected, and the resolved
+/// destination must stay under `dest`. The CDN serves no checksum sidecar
+/// for these archives, so a tampered response must not be able to write
+/// outside the staging directory (#146).
+///
+/// No permission handling: this path only runs for Windows portable builds
+/// (see `install_r_portable`), where unix exec bits don't exist.
 fn extract_zip_to(bytes: &[u8], dest: &Path) -> Result<()> {
     let reader = std::io::Cursor::new(bytes);
     let mut zip = zip::ZipArchive::new(reader)
         .map_err(|e| UvrError::Other(format!("Failed to open R zip: {e}")))?;
-    zip.extract(dest)
-        .map_err(|e| UvrError::Other(format!("Failed to extract R zip: {e}")))?;
+
+    let canonical_dest = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
+
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| UvrError::Other(format!("Failed to read R zip entry: {e}")))?;
+
+        // Guard against path traversal: reject entries with `..` components
+        // or absolute paths that would escape the destination directory.
+        let path = PathBuf::from(entry.name());
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(UvrError::Other(format!(
+                "Path traversal detected in R zip: {}",
+                entry.name()
+            )));
+        }
+
+        let outpath = canonical_dest.join(&path);
+        if !outpath.starts_with(&canonical_dest) {
+            return Err(UvrError::Other(format!(
+                "Path traversal detected in R zip: {}",
+                entry.name()
+            )));
+        }
+
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath).map_err(|e| {
+                UvrError::Other(format!("Failed to create directory extracting R zip: {e}"))
+            })?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    UvrError::Other(format!(
+                        "Failed to create parent directory extracting R zip: {e}"
+                    ))
+                })?;
+            }
+            let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
+                UvrError::Other(format!("Failed to create file extracting R zip: {e}"))
+            })?;
+            std::io::copy(&mut entry, &mut outfile)
+                .map_err(|e| UvrError::Other(format!("Failed to write R zip entry: {e}")))?;
+        }
+    }
     Ok(())
 }
 
@@ -1297,5 +1354,69 @@ VERSION_ID=3.23.4
         // to source compile.
         assert!(crate::registry::p3m::ppm_linux_codename("alpine-3.23").is_none());
         assert!(crate::registry::p3m::ppm_linux_codename("alpine-3.21").is_none());
+    }
+
+    /// Build an in-memory zip whose entries are `(name, contents)` pairs.
+    fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, contents) in entries {
+                zip.start_file(*name, options).unwrap();
+                zip.write_all(contents).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn extract_zip_to_extracts_normal_entries() {
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let bytes = build_zip(&[
+            ("R-4.4.1/bin/R.exe", b"fake binary"),
+            ("R-4.4.1/library/base/DESCRIPTION", b"Package: base\n"),
+        ]);
+        extract_zip_to(&bytes, &dest).unwrap();
+
+        assert!(dest.join("R-4.4.1").join("bin").join("R.exe").exists());
+        assert!(dest
+            .join("R-4.4.1")
+            .join("library")
+            .join("base")
+            .join("DESCRIPTION")
+            .exists());
+    }
+
+    #[test]
+    fn extract_zip_to_rejects_parent_dir_traversal() {
+        // #146: a tampered CDN response with a `../evil` entry must not be
+        // able to write outside the staging directory.
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let bytes = build_zip(&[("../evil.txt", b"escaped")]);
+        let err = extract_zip_to(&bytes, &dest).unwrap_err();
+        assert!(err.to_string().contains("Path traversal"), "{err}");
+        assert!(!dir.path().join("evil.txt").exists());
+        assert!(!dest.join("evil.txt").exists());
+    }
+
+    #[test]
+    fn extract_zip_to_rejects_absolute_paths() {
+        let dir = TempDir::new().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let bytes = build_zip(&[("/tmp/evil.txt", b"escaped")]);
+        let err = extract_zip_to(&bytes, &dest).unwrap_err();
+        assert!(err.to_string().contains("Path traversal"), "{err}");
     }
 }

@@ -214,7 +214,11 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
 /// `constraint`. Unparseable constraints or versions return false — the
 /// drift warning must never fire on input the constraint branch itself
 /// couldn't act on.
-fn pin_conflicts_with_constraint(resolved_version: &str, constraint: &str) -> bool {
+///
+/// Public so `uvr r pin` (no arg) can refuse to write a pin that violates
+/// the manifest constraint (#137), using the exact same conflict semantics
+/// as the resolution-time drift warning above.
+pub fn pin_conflicts_with_constraint(resolved_version: &str, constraint: &str) -> bool {
     let Ok(req) = crate::resolver::parse_version_req(constraint) else {
         return false;
     };
