@@ -7,6 +7,42 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- R version comparison now uses R's semantics (#157): `4.5` == `4.5.0`,
+  `-` separates components (`1.2-7` == `1.2.7`), and a non-numeric tail
+  sorts as a pre-release. The old comparator sorted shorter versions first
+  and silently dropped unparseable components.
+- The resolver records the Bioconductor release in the lockfile itself
+  (#153) instead of relying on every caller to patch it in afterwards — a
+  forgotten patch made sync fall back to the literal "release" URL segment.
+- `uvr r pin` (no argument) refuses to persist a pin that violates the
+  manifest's `[project] r_version` constraint (#137); explicit
+  `uvr r pin <version>` remains a deliberate override.
+- A serialization failure while writing `.vscode/settings.json` no longer
+  truncates the file to a bare newline (#167) — the existing settings are
+  left untouched and the error propagates.
+- The portable R zip extraction validates entries against path traversal
+  (#146), mirroring the guards the package extraction path already had.
+- Remaining HOME-less fallbacks that cached into the working directory now
+  use the system temp dir (#161): P3M/CRAN registry caches, the sync
+  tarball cache, and `uvr run`'s library fallback.
+- **The R↔Bioconductor release mapping is now read from Bioconductor**
+  (#120): `uvr lock` fetches `bioconductor.org/config.yaml` (cached for a
+  week) and picks the newest *released* Bioc paired with the active R,
+  excluding the devel branch. The hardcoded table went stale every ~6
+  months — that's what shipped R 4.6 users a release built for R 4.5
+  (#119). It remains as the offline fallback, so locking without a network
+  still works.
+- **`uvr r install` no longer buffers the whole R archive in memory**
+  (#134): the ~200 MB macOS tarball was held in RAM before extraction,
+  OOMing 2 GB CI runners and memory-capped containers. It now streams to a
+  temp file next to the install directory, like package downloads already
+  did.
+- **Concurrent `uvr r install` of the same version no longer fails one
+  side** (#135): parallel CI matrix jobs or `make -j` could both see the
+  version as missing and both install it. The final rename now arbitrates —
+  the process that loses adopts the completed install instead of erroring
+  and orphaning its staging directory. A concurrent `r uninstall` of an
+  already-removed version is likewise no longer an error.
 - **P3M Linux binaries with bundled shared libraries now extract** (#203):
   archives built by R's internal tar record the link target's size on
   symlink headers; the Rust tar crate trusted that field, skipped megabytes

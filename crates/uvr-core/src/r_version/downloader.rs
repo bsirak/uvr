@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -550,15 +551,42 @@ pub async fn download_and_install_r(
     info!("Downloading R {version} from {url}");
 
     let response = client.get(&url).send().await?;
-    let bytes = if response.status().is_client_error() {
+    if response.status().is_client_error() {
         return Err(version_not_found_error(client, version, platform, response.status()).await);
-    } else {
-        response.error_for_status()?.bytes().await?
-    };
+    }
+    let mut response = response.error_for_status()?;
+
+    // Stream the archive to a temp file instead of buffering it (#134). The
+    // macOS tarball is ~200 MB and `.bytes()` held every byte in RAM, which
+    // OOMs 2 GB CI runners and memory-capped containers — the package
+    // download path (installer/download.rs) has streamed for exactly this
+    // reason. The temp file is a sibling of the install dir, not `/tmp`:
+    // `/tmp` is a tmpfs on many hosts, which would put the payload straight
+    // back into memory, and it is often smaller than the archive.
+    let staging_root = install_dir.parent().ok_or_else(|| {
+        UvrError::Other(format!(
+            "Install path {} has no parent directory",
+            install_dir.display()
+        ))
+    })?;
+    std::fs::create_dir_all(staging_root).map_err(|e| {
+        UvrError::Other(format!("Failed to create {}: {e}", staging_root.display()))
+    })?;
+    let mut archive = tempfile::Builder::new()
+        .prefix(".uvr-r-dl-")
+        .tempfile_in(staging_root)
+        .map_err(|e| UvrError::Other(format!("Failed to create temp file for R archive: {e}")))?;
+    while let Some(chunk) = response.chunk().await? {
+        archive.write_all(&chunk)?;
+    }
+    archive.flush()?;
 
     // install_r_portable stages next to install_dir and moves the extracted
     // tree into place with one atomic rename — install_dir must not pre-exist.
-    install_r_portable(&bytes, &install_dir, platform)?;
+    install_r_portable(archive.path(), &install_dir, platform)?;
+    // Extraction is done with it — release the ~200 MB now rather than at the
+    // end of the function, which still has an `R --version` probe to run.
+    drop(archive);
 
     if !r_binary.exists() {
         // Don't leave a tree without bin/R behind: it would trip the
@@ -682,8 +710,7 @@ fn find_dir_with_r_binary(dir: &Path, depth: usize) -> Option<PathBuf> {
     if depth > 12 {
         return None; // guard against symlink loops
     }
-    let bin = dir.join("bin");
-    if bin.join("R").exists() || bin.join("R.exe").exists() {
+    if has_r_binary(dir) {
         return Some(dir.to_path_buf());
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -746,7 +773,7 @@ pub async fn fetch_available_versions(
     Ok(versions)
 }
 
-/// Install a portable R build by extracting `bytes` into `dest`.
+/// Install a portable R build by extracting the archive at `archive` into `dest`.
 ///
 /// The rstudio/r-builds portable archives are relocatable: R resolves its own
 /// `R_HOME` at runtime and bundles its dependency libraries. So there is no
@@ -761,7 +788,10 @@ pub async fn fetch_available_versions(
 /// `dest` either doesn't exist or is complete. The staging dir is removed on
 /// every error path (dot-prefixed so version listing skips it if the process
 /// dies uncleanly).
-fn install_r_portable(bytes: &[u8], dest: &Path, platform: Platform) -> Result<()> {
+///
+/// That rename is also the arbitration point between concurrent installs of
+/// the same version (#135) — see the race handling below.
+fn install_r_portable(archive: &Path, dest: &Path, platform: Platform) -> Result<()> {
     let parent = dest.parent().ok_or_else(|| {
         UvrError::Other(format!(
             "Install path {} has no parent directory",
@@ -777,9 +807,9 @@ fn install_r_portable(bytes: &[u8], dest: &Path, platform: Platform) -> Result<(
     let stage = tmp.path();
 
     if platform.is_windows() {
-        extract_zip_to(bytes, stage)?;
+        extract_zip_to(archive, stage)?;
     } else {
-        extract_tar_gz_to(bytes, stage)?;
+        extract_tar_gz_to(archive, stage)?;
     }
 
     // Portable archives may nest R under a top-level `R-<version>/` dir.
@@ -789,19 +819,50 @@ fn install_r_portable(bytes: &[u8], dest: &Path, platform: Platform) -> Result<(
         )
     })?;
 
-    std::fs::rename(&r_home, dest).map_err(|e| {
-        UvrError::Other(format!(
+    if let Err(e) = std::fs::rename(&r_home, dest) {
+        // Another uvr process may have installed the same version while this
+        // one was downloading (#135): the existence check at the top of
+        // `download_and_install_r` is a check-then-act that parallel CI matrix
+        // jobs or `make -j` invocations can both pass. Renaming a directory
+        // onto a populated one fails rather than clobbering it, so a rename
+        // failure with a usable R now at `dest` means we lost the race —
+        // their tree came from the same URL as ours, so adopt it and let the
+        // staging dir be removed on drop. Any other failure is real.
+        if has_r_binary(dest) {
+            info!(
+                "Another process installed R at {} first; using it",
+                dest.display()
+            );
+            return Ok(());
+        }
+        return Err(UvrError::Other(format!(
             "Failed to move extracted R into place ({} -> {}): {e}",
             r_home.display(),
             dest.display()
-        ))
-    })?;
+        )));
+    }
     Ok(())
 }
 
-/// Extract a `.tar.gz` into `dest`, preserving symlinks and unix permissions.
-fn extract_tar_gz_to(bytes: &[u8], dest: &Path) -> Result<()> {
-    let dec = flate2::read::GzDecoder::new(bytes);
+/// True when `dir` holds an R installation root (`bin/R`, or `bin/R.exe` on
+/// Windows). Not a health check — [`crate::r_version::detector::query_r_version`]
+/// is what decides whether an install actually runs.
+fn has_r_binary(dir: &Path) -> bool {
+    let bin = dir.join("bin");
+    bin.join("R").exists() || bin.join("R.exe").exists()
+}
+
+/// Extract the `.tar.gz` at `archive` into `dest`, preserving symlinks and
+/// unix permissions. Reads from the file rather than a `&[u8]` so the ~200 MB
+/// payload never has to be resident (#134).
+fn extract_tar_gz_to(archive: &Path, dest: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to open downloaded R archive {}: {e}",
+            archive.display()
+        ))
+    })?;
+    let dec = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
     let mut ar = tar::Archive::new(dec);
     ar.set_preserve_permissions(true);
     ar.set_overwrite(true);
@@ -810,7 +871,9 @@ fn extract_tar_gz_to(bytes: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Extract a `.zip` into `dest` (Windows portable builds).
+/// Extract the `.zip` at `archive` into `dest` (Windows portable builds).
+/// `ZipArchive` needs `Read + Seek`, which the file provides directly — no
+/// in-memory `Cursor` over the whole payload (#134).
 ///
 /// Validates every entry against path traversal (zip-slip) before writing,
 /// mirroring the package-install path in `installer::binary_install`: entries
@@ -821,9 +884,14 @@ fn extract_tar_gz_to(bytes: &[u8], dest: &Path) -> Result<()> {
 ///
 /// No permission handling: this path only runs for Windows portable builds
 /// (see `install_r_portable`), where unix exec bits don't exist.
-fn extract_zip_to(bytes: &[u8], dest: &Path) -> Result<()> {
-    let reader = std::io::Cursor::new(bytes);
-    let mut zip = zip::ZipArchive::new(reader)
+fn extract_zip_to(archive: &Path, dest: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive).map_err(|e| {
+        UvrError::Other(format!(
+            "Failed to open downloaded R archive {}: {e}",
+            archive.display()
+        ))
+    })?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))
         .map_err(|e| UvrError::Other(format!("Failed to open R zip: {e}")))?;
 
     let canonical_dest = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
@@ -1054,37 +1122,42 @@ mod tests {
         assert!(found.is_none());
     }
 
+    /// Write a gzipped tar of `(path, contents, mode)` entries to a temp file
+    /// and return it. `install_r_portable` now reads the archive from disk
+    /// (#134), so tests hand it a path rather than a byte slice.
+    fn write_tar_gz(entries: &[(&str, &[u8], u32)]) -> tempfile::NamedTempFile {
+        let mut tar_buf = Vec::new();
+        {
+            let enc = flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(enc);
+            for (path, contents, mode) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(contents.len() as u64);
+                header.set_mode(*mode);
+                header.set_cksum();
+                builder.append_data(&mut header, path, *contents).unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+        }
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&tar_buf).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
     #[test]
     fn install_r_portable_flattens_nested_tarball() {
         // Build a .tar.gz whose R_HOME is nested under `R-4.4.2/` (as the
         // portable archives are), then verify install_r_portable flattens it
         // so `<dest>/bin/R` exists.
-        let mut tar_buf = Vec::new();
-        {
-            let enc = flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::fast());
-            let mut builder = tar::Builder::new(enc);
-            let script = b"#!/bin/sh\necho R\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_size(script.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, "R-4.4.2/bin/R", &script[..])
-                .unwrap();
-            let lib = b"libR";
-            let mut h2 = tar::Header::new_gnu();
-            h2.set_size(lib.len() as u64);
-            h2.set_mode(0o644);
-            h2.set_cksum();
-            builder
-                .append_data(&mut h2, "R-4.4.2/lib/libR.so", &lib[..])
-                .unwrap();
-            builder.into_inner().unwrap().finish().unwrap();
-        }
+        let archive = write_tar_gz(&[
+            ("R-4.4.2/bin/R", b"#!/bin/sh\necho R\n", 0o755),
+            ("R-4.4.2/lib/libR.so", b"libR", 0o644),
+        ]);
 
         let dest_dir = TempDir::new().unwrap();
         let dest = dest_dir.path().join("4.4.2");
-        install_r_portable(&tar_buf, &dest, Platform::LinuxX86_64).unwrap();
+        install_r_portable(archive.path(), &dest, Platform::LinuxX86_64).unwrap();
         assert!(dest.join("bin").join("R").exists());
         assert!(dest.join("lib").join("libR.so").exists());
         // The sibling staging dir must be gone after a successful install.
@@ -1100,30 +1173,60 @@ mod tests {
     fn install_r_portable_cleans_stage_on_bad_archive() {
         // A tarball with no bin/R must error AND leave neither dest nor a
         // staging dir behind.
-        let mut tar_buf = Vec::new();
-        {
-            let enc = flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::fast());
-            let mut builder = tar::Builder::new(enc);
-            let junk = b"not R";
-            let mut header = tar::Header::new_gnu();
-            header.set_size(junk.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, "R-4.4.2/README", &junk[..])
-                .unwrap();
-            builder.into_inner().unwrap().finish().unwrap();
-        }
+        let archive = write_tar_gz(&[("R-4.4.2/README", b"not R", 0o644)]);
 
         let dest_dir = TempDir::new().unwrap();
         let dest = dest_dir.path().join("4.4.2");
-        assert!(install_r_portable(&tar_buf, &dest, Platform::LinuxX86_64).is_err());
+        assert!(install_r_portable(archive.path(), &dest, Platform::LinuxX86_64).is_err());
         assert!(!dest.exists(), "dest must not exist after a failed install");
         let leftovers: Vec<_> = std::fs::read_dir(dest_dir.path())
             .unwrap()
             .flatten()
             .collect();
         assert!(leftovers.is_empty(), "staging dir leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn install_r_portable_yields_to_a_concurrent_install() {
+        // #135: two `uvr r install <same-ver>` processes can both pass the
+        // "not installed" check and both extract. The rename arbitrates —
+        // the loser must adopt the winner's tree (not clobber it, not error,
+        // not leak its staging dir), which is what a pre-existing populated
+        // dest simulates here.
+        let archive = write_tar_gz(&[("R-4.4.2/bin/R", b"#!/bin/sh\necho ours\n", 0o755)]);
+
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("4.4.2");
+        std::fs::create_dir_all(dest.join("bin")).unwrap();
+        std::fs::write(dest.join("bin").join("R"), b"#!/bin/sh\necho theirs\n").unwrap();
+
+        install_r_portable(archive.path(), &dest, Platform::LinuxX86_64)
+            .expect("losing the rename race must not be an error");
+        // The winner's install is untouched.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("bin").join("R")).unwrap(),
+            "#!/bin/sh\necho theirs\n"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dest_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".uvr-stage-"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging dir leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn install_r_portable_still_errors_when_dest_is_unusable() {
+        // The race arm must not swallow genuine rename failures: a dest that
+        // exists but holds no R is a broken state, not another process's win.
+        let archive = write_tar_gz(&[("R-4.4.2/bin/R", b"#!/bin/sh\necho R\n", 0o755)]);
+
+        let dest_dir = TempDir::new().unwrap();
+        let dest = dest_dir.path().join("4.4.2");
+        std::fs::create_dir_all(dest.join("junk")).unwrap();
+        std::fs::write(dest.join("junk").join("file"), b"x").unwrap();
+
+        assert!(install_r_portable(archive.path(), &dest, Platform::LinuxX86_64).is_err());
     }
 
     #[test]
@@ -1356,12 +1459,13 @@ VERSION_ID=3.23.4
         assert!(crate::registry::p3m::ppm_linux_codename("alpine-3.21").is_none());
     }
 
-    /// Build an in-memory zip whose entries are `(name, contents)` pairs.
-    fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    /// Build a zip on disk whose entries are `(name, contents)` pairs and
+    /// return its tempfile (extract_zip_to reads from a path, #134).
+    fn build_zip(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
         use std::io::Write;
-        let mut buf = std::io::Cursor::new(Vec::new());
+        let file = tempfile::NamedTempFile::new().unwrap();
         {
-            let mut zip = zip::ZipWriter::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(file.path()).unwrap());
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             for (name, contents) in entries {
@@ -1370,7 +1474,7 @@ VERSION_ID=3.23.4
             }
             zip.finish().unwrap();
         }
-        buf.into_inner()
+        file
     }
 
     #[test]
@@ -1379,11 +1483,11 @@ VERSION_ID=3.23.4
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
-        let bytes = build_zip(&[
+        let archive = build_zip(&[
             ("R-4.4.1/bin/R.exe", b"fake binary"),
             ("R-4.4.1/library/base/DESCRIPTION", b"Package: base\n"),
         ]);
-        extract_zip_to(&bytes, &dest).unwrap();
+        extract_zip_to(archive.path(), &dest).unwrap();
 
         assert!(dest.join("R-4.4.1").join("bin").join("R.exe").exists());
         assert!(dest
@@ -1402,8 +1506,8 @@ VERSION_ID=3.23.4
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
-        let bytes = build_zip(&[("../evil.txt", b"escaped")]);
-        let err = extract_zip_to(&bytes, &dest).unwrap_err();
+        let archive = build_zip(&[("../evil.txt", b"escaped")]);
+        let err = extract_zip_to(archive.path(), &dest).unwrap_err();
         assert!(err.to_string().contains("Path traversal"), "{err}");
         assert!(!dir.path().join("evil.txt").exists());
         assert!(!dest.join("evil.txt").exists());
@@ -1415,8 +1519,8 @@ VERSION_ID=3.23.4
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
-        let bytes = build_zip(&[("/tmp/evil.txt", b"escaped")]);
-        let err = extract_zip_to(&bytes, &dest).unwrap_err();
+        let archive = build_zip(&[("/tmp/evil.txt", b"escaped")]);
+        let err = extract_zip_to(archive.path(), &dest).unwrap_err();
         assert!(err.to_string().contains("Path traversal"), "{err}");
     }
 }
