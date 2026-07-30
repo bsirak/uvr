@@ -62,6 +62,7 @@ pub fn cache_key(
     r_minor: &str,
     is_binary: bool,
     libr_path: Option<&Path>,
+    binary_flavor: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(checksum.unwrap_or("none").as_bytes());
@@ -77,6 +78,18 @@ pub fn cache_key(
     hasher.update(std::env::consts::ARCH.as_bytes());
     hasher.update(b"-");
     hasher.update(std::env::consts::OS.as_bytes());
+    // Which binary repo the artifact came from. A `jammy` build and a
+    // `manylinux_2_28` build of the same package+version are different
+    // artifacts linking different libraries, and only one of them loads on a
+    // given host (#175) — so they must not share a cache entry.
+    //
+    // Only hashed when present, which keeps macOS/Windows and source-built
+    // keys byte-identical to before; only Linux binary entries are
+    // re-keyed, and those are exactly the ones that were ambiguous.
+    if let Some(flavor) = binary_flavor {
+        hasher.update(b"|");
+        hasher.update(flavor.as_bytes());
+    }
     if let Some(p) = libr_path {
         hasher.update(b"|");
         hasher.update(p.to_string_lossy().as_bytes());
@@ -167,12 +180,31 @@ pub fn lookup_any(
     version: &str,
     checksum: Option<&str>,
     r_minor: &str,
-    is_binary_hint: bool,
+    binary_allowed: bool,
     libr_path: Option<&Path>,
+    binary_flavor: Option<&str>,
 ) -> Option<PathBuf> {
-    // Try the hinted variant first, then the opposite.
-    for &try_binary in &[is_binary_hint, !is_binary_hint] {
-        let key = cache_key(name, version, checksum, r_minor, try_binary, libr_path);
+    // Probe the binary variant first when this platform can use P3M binaries
+    // at all, then source.
+    //
+    // When it cannot, a cached *binary* entry must never be served. Those
+    // entries exist on such machines only as leftovers from a uvr that
+    // mis-identified the distro (#175) — they link shared libraries this
+    // system does not have and fail at `library()`. Without this gate the
+    // distro fix is inert for exactly the users who already hit the bug,
+    // because the broken artifact is still in `~/.uvr/packages/`.
+    let variants: &[bool] = if binary_allowed {
+        &[true, false]
+    } else {
+        &[false]
+    };
+    for &try_binary in variants {
+        // Flavour only identifies a *binary* artifact; a source build is
+        // compiled here and is not repo-specific.
+        let flavor = if try_binary { binary_flavor } else { None };
+        let key = cache_key(
+            name, version, checksum, r_minor, try_binary, libr_path, flavor,
+        );
         let pkg_dir = global_packages_dir().join(&key).join(name);
         if pkg_dir.join("DESCRIPTION").exists() {
             return Some(pkg_dir);
@@ -517,8 +549,8 @@ mod tests {
 
     #[test]
     fn cache_key_deterministic() {
-        let k1 = cache_key("ggplot2", "3.5.1", Some("abc123"), "4.4", true, None);
-        let k2 = cache_key("ggplot2", "3.5.1", Some("abc123"), "4.4", true, None);
+        let k1 = cache_key("ggplot2", "3.5.1", Some("abc123"), "4.4", true, None, None);
+        let k2 = cache_key("ggplot2", "3.5.1", Some("abc123"), "4.4", true, None, None);
         assert_eq!(k1, k2);
         assert!(k1.starts_with("ggplot2-3.5.1-"));
         assert_eq!(k1.len(), "ggplot2-3.5.1-".len() + 32);
@@ -526,33 +558,65 @@ mod tests {
 
     #[test]
     fn cache_key_differs_by_r_version() {
-        let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None);
-        let k2 = cache_key("pkg", "1.0", Some("abc"), "4.5", true, None);
+        let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None, None);
+        let k2 = cache_key("pkg", "1.0", Some("abc"), "4.5", true, None, None);
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn cache_key_differs_by_method() {
-        let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None);
-        let k2 = cache_key("pkg", "1.0", Some("abc"), "4.4", false, None);
+        let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None, None);
+        let k2 = cache_key("pkg", "1.0", Some("abc"), "4.4", false, None, None);
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_differs_by_binary_flavor() {
+        // A jammy build and a manylinux build of the same package+version
+        // link different libraries and only one loads on a given host
+        // (#175), so they must not collide in the cache.
+        let jammy = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None, Some("jammy"));
+        let many = cache_key(
+            "pkg",
+            "1.0",
+            Some("abc"),
+            "4.4",
+            true,
+            None,
+            Some("manylinux_2_28"),
+        );
+        assert_ne!(jammy, many);
+
+        // Absent flavour must stay byte-identical to before this field
+        // existed, so macOS/Windows and source entries are not invalidated.
+        let unflavoured = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None, None);
+        assert_ne!(unflavoured, jammy);
+        assert_ne!(unflavoured, many);
     }
 
     #[test]
     fn cache_key_differs_by_libr_path() {
         let p1 = PathBuf::from("/home/.uvr/r-versions/4.4.2/lib/libR.dylib");
         let p2 = PathBuf::from("/home/.uvr/r-versions/4.4.3/lib/libR.dylib");
-        let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, Some(&p1));
-        let k2 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, Some(&p2));
+        let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, Some(&p1), None);
+        let k2 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, Some(&p2), None);
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn package_name_from_key_roundtrips_cache_key() {
-        let key = cache_key("ggplot2", "3.5.1", Some("abc123"), "4.4", true, None);
+        let key = cache_key("ggplot2", "3.5.1", Some("abc123"), "4.4", true, None, None);
         assert_eq!(package_name_from_key(&key), Some("ggplot2"));
         // Dots in names are fine (e.g. data.table).
-        let key = cache_key("data.table", "1.15.4", Some("abc"), "4.5", false, None);
+        let key = cache_key(
+            "data.table",
+            "1.15.4",
+            Some("abc"),
+            "4.5",
+            false,
+            None,
+            None,
+        );
         assert_eq!(package_name_from_key(&key), Some("data.table"));
     }
 
@@ -560,7 +624,7 @@ mod tests {
     fn package_name_from_key_handles_hyphenated_versions() {
         // R package *versions* may contain hyphens (Matrix "1.6-5"); names
         // cannot, so the name is everything before the first hyphen.
-        let key = cache_key("Matrix", "1.6-5", Some("abc"), "4.4", true, None);
+        let key = cache_key("Matrix", "1.6-5", Some("abc"), "4.4", true, None, None);
         assert_eq!(package_name_from_key(&key), Some("Matrix"));
     }
 
@@ -699,15 +763,44 @@ mod tests {
         .unwrap();
 
         // Store under the source key (is_binary=false)
-        let source_key = cache_key("testpkg", "1.0", Some("cksum"), "4.5", false, None);
+        let source_key = cache_key("testpkg", "1.0", Some("cksum"), "4.5", false, None, None);
         store(&pkg_dir, &source_key, "testpkg", None).unwrap();
 
         // Lookup with binary hint (is_binary=true) — should still find the source entry
-        let found = lookup_any("testpkg", "1.0", Some("cksum"), "4.5", true, None);
+        let found = lookup_any("testpkg", "1.0", Some("cksum"), "4.5", true, None, None);
         assert!(found.is_some());
 
         // Cleanup
         let _ = std::fs::remove_dir_all(global_packages_dir().join(&source_key));
+    }
+
+    #[test]
+    fn lookup_any_refuses_a_binary_entry_when_binaries_are_unusable() {
+        // #175: on a distro P3M doesn't publish for, a cached binary is a
+        // leftover from a uvr that mis-identified the distro. Serving it
+        // reinstalls a package that cannot load, and would make the distro
+        // fix inert for exactly the people who already hit the bug.
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("binpkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("DESCRIPTION"),
+            "Package: binpkg\nVersion: 1.0\n",
+        )
+        .unwrap();
+
+        let binary_key = cache_key("binpkg", "1.0", Some("cksum"), "4.5", true, None, None);
+        store(&pkg_dir, &binary_key, "binpkg", None).unwrap();
+
+        // Binaries usable here → the entry is served.
+        assert!(lookup_any("binpkg", "1.0", Some("cksum"), "4.5", true, None, None).is_some());
+        // Binaries NOT usable here → it must be ignored, forcing a source build.
+        assert!(
+            lookup_any("binpkg", "1.0", Some("cksum"), "4.5", false, None, None).is_none(),
+            "a binary cache entry was served on a platform that cannot use binaries"
+        );
+
+        let _ = std::fs::remove_dir_all(global_packages_dir().join(&binary_key));
     }
 
     #[test]

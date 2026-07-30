@@ -174,6 +174,33 @@ fn ensure_linux_libc_supported() -> Result<()> {
     Ok(())
 }
 
+/// Lowest glibc the P3M `manylinux_2_28` package repo supports.
+const PPM_MANYLINUX_GLIBC_MIN: (u32, u32) = (2, 28);
+
+/// The portable P3M package repo usable on this host, if any.
+///
+/// Posit publishes a `manylinux_2_28` CRAN repo (preview) whose binaries
+/// vendor their own shared libraries — `libxml2-35ea8990.so.2.9.7` and the
+/// like, the same trick Python wheels use. Unlike the per-distro repos, they
+/// carry no dependency on the host's library versions, so they work on
+/// distros Posit doesn't publish for: Arch, Fedora, NixOS, Gentoo.
+///
+/// That makes this the right fallback for an unrecognized distro — better
+/// than compiling from source, and correct where a per-distro binary is not
+/// (#175). Verified on Arch: the manylinux `xml2` loads and parses, while the
+/// jammy build fails on a missing `libxml2.so.2`.
+///
+/// `None` on musl, on glibc older than 2.28, and on non-Linux hosts (where
+/// the per-platform repos already apply).
+pub fn ppm_manylinux_repo() -> Option<&'static str> {
+    if !cfg!(target_os = "linux") || linux_is_musl() {
+        return None;
+    }
+    // An unreadable glibc version is not evidence of a new enough one.
+    let (maj, min) = detect_glibc_version()?;
+    ((maj, min) >= PPM_MANYLINUX_GLIBC_MIN).then_some("manylinux_2_28")
+}
+
 /// Parse an `X.Y.Z` R version into a comparable tuple. Extra components and
 /// non-numeric tails are ignored. Returns `None` if the first component isn't numeric.
 fn parse_r_version(version: &str) -> Option<(u32, u32, u32)> {
@@ -205,7 +232,12 @@ pub fn set_posit_distro_override(slug: String) {
 /// override set by [`set_posit_distro_override`] if any.
 ///
 /// Returns strings like `"ubuntu-2204"`, `"ubuntu-2404"`, `"debian-12"`,
-/// `"centos-7"`, `"rhel-9"`, `"opensuse-154"`. Falls back to `"ubuntu-2204"`.
+/// `"centos-7"`, `"rhel-9"`, `"opensuse-154"`.
+///
+/// A distro Posit doesn't publish for returns its own identity (`"arch"`,
+/// `"cachyos"`, `"nixos-25.05"`), which no PPM codename maps to — so P3M is
+/// skipped and sync compiles from source. See
+/// [`detect_posit_distro_slug_from_os_release`] for why that matters.
 pub fn detect_posit_distro_slug() -> String {
     if let Some(override_slug) = DISTRO_OVERRIDE.get() {
         return override_slug.clone();
@@ -217,21 +249,39 @@ pub fn detect_posit_distro_slug() -> String {
 /// Testable helper: parse os-release content (or fall back) into a Posit
 /// CDN distro slug. Module-private; the inline test module calls it
 /// directly. Production callers go through [`detect_posit_distro_slug`].
+/// # Why an unknown distro must not guess
+///
+/// This slug's only remaining production consumer is P3M **binary package**
+/// selection (`sync`) and the `doctor` display; R itself is installed from
+/// portable manylinux/musllinux builds chosen by libc and architecture, so
+/// `--distribution` is deprecated and ignored.
+///
+/// That changed what a wrong guess costs. It used to pick an R tarball, where
+/// being approximately right still gave you a working R. Now it picks package
+/// binaries that link the *host distro's* shared libraries by SONAME. Claiming
+/// `ubuntu-2204` on Arch installed jammy binaries wanting `libxml2.so.2`
+/// against a system that ships `libxml2.so.16` — the install "succeeded" in
+/// seconds and every affected package failed at `library()` (#175).
+///
+/// There is no distro-neutral binary to fall back to either: every P3M flavour
+/// that serves a binary (jammy, noble, rhel9) links `libxml2.so.2`. rstudio's
+/// portable-R docs say the same thing — those builds cover the interpreter,
+/// and "users can compile R packages from source on target systems".
+///
+/// So an unrecognized distro returns its own identity, which
+/// [`crate::registry::p3m::ppm_linux_codename`] maps to `None`, P3M is skipped
+/// and sync compiles from source against the libraries actually installed.
+/// Slower, and correct. This mirrors what the `alpine` arm already does
+/// deliberately.
 pub(crate) fn detect_posit_distro_slug_from_os_release(content: Option<&str>) -> String {
-    let content = match content {
-        Some(c) => c,
-        None => return "ubuntu-2204".to_string(),
+    // No os-release at all: a scratch container, or not Linux. Nothing to
+    // identify, so claim nothing rather than a distro we merely hope for.
+    let Some(content) = content else {
+        return "unknown".to_string();
     };
 
-    let mut id = String::new();
-    let mut version_id = String::new();
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix("ID=") {
-            id = val.trim_matches('"').to_lowercase();
-        } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
-            version_id = val.trim_matches('"').to_string();
-        }
-    }
+    let crate::os_release::OsRelease { id, version_id } =
+        crate::os_release::OsRelease::parse(content);
 
     // Posit CDN uses no dots in version for Ubuntu/openSUSE, but keeps them for others
     match id.as_str() {
@@ -256,7 +306,12 @@ pub(crate) fn detect_posit_distro_slug_from_os_release(content: Option<&str>) ->
             let minor = version_id.split('.').take(2).collect::<Vec<_>>().join(".");
             format!("alpine-{minor}")
         }
-        _ => "ubuntu-2204".to_string(),
+        // Anything Posit doesn't publish for — Arch, CachyOS, NixOS, Gentoo,
+        // Fedora, Void — reports itself. No PPM codename matches, so the
+        // caller falls through to a source build.
+        _ if id.is_empty() => "unknown".to_string(),
+        _ if version_id.is_empty() => id,
+        _ => format!("{id}-{version_id}"),
     }
 }
 
@@ -1187,11 +1242,52 @@ VERSION_ID=3.23.4
     }
 
     #[test]
-    fn detect_posit_distro_slug_unknown_distro_still_falls_back() {
-        // Regression: Arch / NixOS / Gentoo / etc. keep the ubuntu-2204
-        // fallback (out of scope for this PR).
-        let slug = detect_posit_distro_slug_from_os_release(Some("ID=arch\n"));
-        assert_eq!(slug, "ubuntu-2204");
+    fn detect_posit_distro_slug_unknown_distro_reports_itself() {
+        // #175: claiming ubuntu-2204 here installed jammy binaries on Arch
+        // that could not load. An unknown distro now identifies itself, and
+        // no PPM codename matches it, so sync compiles from source.
+        for (os_release, expected) in [
+            ("ID=arch\n", "arch"),
+            ("ID=cachyos\nID_LIKE=arch\n", "cachyos"),
+            ("ID=gentoo\n", "gentoo"),
+            ("ID=nixos\nVERSION_ID=\"25.05\"\n", "nixos-25.05"),
+            ("ID=fedora\nVERSION_ID=42\n", "fedora-42"),
+        ] {
+            let slug = detect_posit_distro_slug_from_os_release(Some(os_release));
+            assert_eq!(slug, expected, "slug for {os_release:?}");
+            assert_eq!(
+                crate::registry::p3m::ppm_linux_codename(&slug),
+                None,
+                "{slug} must not resolve to a PPM codename, or binaries get installed"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_without_os_release_claims_nothing() {
+        let slug = detect_posit_distro_slug_from_os_release(None);
+        assert_eq!(slug, "unknown");
+        assert_eq!(crate::registry::p3m::ppm_linux_codename(&slug), None);
+    }
+
+    #[test]
+    fn detect_posit_distro_slug_still_recognizes_supported_distros() {
+        // Regression: the distros Posit *does* publish for must keep
+        // resolving to a codename, or this fix would disable binaries for
+        // everyone.
+        for (os_release, slug, codename) in [
+            ("ID=ubuntu\nVERSION_ID=\"22.04\"\n", "ubuntu-2204", "jammy"),
+            ("ID=ubuntu\nVERSION_ID=\"24.04\"\n", "ubuntu-2404", "noble"),
+            ("ID=debian\nVERSION_ID=\"12\"\n", "debian-12", "bookworm"),
+            ("ID=rocky\nVERSION_ID=\"9.3\"\n", "rhel-9", "rhel9"),
+        ] {
+            let got = detect_posit_distro_slug_from_os_release(Some(os_release));
+            assert_eq!(got, slug);
+            assert_eq!(
+                crate::registry::p3m::ppm_linux_codename(&got),
+                Some(codename)
+            );
+        }
     }
 
     #[test]

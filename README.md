@@ -223,6 +223,7 @@ uvr tree
 | `uvr remove <pkg...>` | Remove packages from manifest and re-lock |
 | `uvr sync` | Install all packages from the lockfile |
 | `uvr sync --frozen` | Like `sync`, but fail if the lockfile is stale (CI mode) |
+| `uvr sync --no-binary` | Build everything from source, ignoring pre-built binaries |
 | `uvr update [pkg...]` | Upgrade packages to latest allowed versions |
 | `uvr update --dry-run` | Show what would change without installing |
 | `uvr lock` | Re-resolve all deps and update `uvr.lock` without installing |

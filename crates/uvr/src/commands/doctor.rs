@@ -65,7 +65,7 @@ fn check_platform() {
                 ui::check(true, label, palette::success("available"), LABEL_W);
             } else {
                 let slug = uvr_core::r_version::downloader::detect_posit_distro_slug();
-                if let Some(codename) = uvr_core::registry::p3m::ppm_linux_codename(&slug) {
+                if let Some(codename) = uvr_core::registry::p3m::ppm_linux_repo(&slug) {
                     ui::check(
                         true,
                         label,
