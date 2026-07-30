@@ -426,9 +426,7 @@ pub fn ppm_linux_repo(posit_slug: &str) -> Option<&'static str> {
 
 fn cache_path(r_minor: &str, key: &str) -> PathBuf {
     let date = Local::now().format("%Y-%m-%d").to_string();
-    crate::env_vars::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(format!("p3m-{r_minor}-{key}-{date}.txt"))
+    crate::env_vars::cache_dir_or_temp().join(format!("p3m-{r_minor}-{key}-{date}.txt"))
 }
 
 #[cfg(test)]

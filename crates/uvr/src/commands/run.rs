@@ -36,7 +36,12 @@ pub async fn run(
 
     let library: PathBuf = project_library.unwrap_or_else(|| {
         dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| {
+                // HOME-less environment (sandbox/CI): degrade to the system
+                // temp dir instead of dropping a library tree into the
+                // working directory (#161).
+                std::env::temp_dir()
+            })
             .join("uvr")
             .join("library")
     });

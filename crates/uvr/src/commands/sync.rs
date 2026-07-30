@@ -673,7 +673,7 @@ async fn install_from_lockfile_with_r(
             }
         }
     }
-    let cache_dir = uvr_core::env_vars::cache_dir().unwrap_or_else(|| PathBuf::from("."));
+    let cache_dir = uvr_core::env_vars::cache_dir_or_temp();
 
     // Use the R binary resolved at the top of install_from_lockfile.
     let (r_binary, r_version_str) = r_info

@@ -2,7 +2,8 @@ use anyhow::{bail, Context, Result};
 
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{
-    find_all, find_r_binary, is_plausible_r_version, query_r_version, version_matches_prefix,
+    find_all, find_r_binary, is_plausible_r_version, pin_conflicts_with_constraint,
+    query_r_version, version_matches_prefix,
 };
 
 use crate::ui;
@@ -40,8 +41,16 @@ pub fn run(version: Option<String>) -> Result<()> {
             let constraint = project.manifest.project.r_version.as_deref();
             let binary = find_r_binary(constraint)
                 .context("R not found. Install R or use `uvr r install <version>`")?;
-            query_r_version(&binary)
-                .context("Could not determine R version from the active R binary")?
+            let resolved = query_r_version(&binary)
+                .context("Could not determine R version from the active R binary")?;
+            // find_r_binary honours an existing `.r-version` pin over the
+            // manifest constraint, so the resolved version can still violate
+            // [project] r_version (e.g. a stale pin at 4.3 in a `^4.5`
+            // project). Refuse to re-write such a pin: silently persisting a
+            // version that overrides the manifest on every later resolution
+            // is how projects drift (#137).
+            ensure_pin_satisfies_constraint(&resolved, constraint)?;
+            resolved
         }
     };
 
@@ -57,4 +66,51 @@ pub fn run(version: Option<String>) -> Result<()> {
     ));
 
     Ok(())
+}
+
+/// Refuse an implicit (no-arg) pin when the resolved R version violates the
+/// manifest's `[project] r_version` constraint (#137). Explicit
+/// `uvr r pin <version>` stays allowed — that's a deliberate override.
+fn ensure_pin_satisfies_constraint(resolved: &str, constraint: Option<&str>) -> Result<()> {
+    if let Some(constraint) = constraint {
+        if pin_conflicts_with_constraint(resolved, constraint) {
+            bail!(
+                "The active R is {resolved}, which does not satisfy the [project] \
+                 r_version constraint `{constraint}` in uvr.toml. Pin a matching \
+                 version with `uvr r pin <version>`, or update the constraint."
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn implicit_pin_refuses_constraint_violation() {
+        // #137: a no-arg pin must not persist a version the manifest forbids.
+        let err = ensure_pin_satisfies_constraint("3.6.3", Some("^4.5")).unwrap_err();
+        assert!(err.to_string().contains("^4.5"), "{err}");
+        assert!(err.to_string().contains("3.6.3"), "{err}");
+    }
+
+    #[test]
+    fn implicit_pin_allows_satisfying_version() {
+        ensure_pin_satisfies_constraint("4.5.1", Some("^4.5")).unwrap();
+        ensure_pin_satisfies_constraint("4.5.1", Some(">=4.4")).unwrap();
+    }
+
+    #[test]
+    fn implicit_pin_allows_unconstrained_projects() {
+        ensure_pin_satisfies_constraint("3.6.3", None).unwrap();
+    }
+
+    #[test]
+    fn implicit_pin_ignores_unparseable_constraints() {
+        // Mirrors find_r_binary's drift warning: constraints the resolver
+        // itself couldn't act on must not block the pin here.
+        ensure_pin_satisfies_constraint("4.5.1", Some("not-a-constraint")).unwrap();
+    }
 }

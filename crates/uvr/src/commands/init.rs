@@ -293,8 +293,16 @@ pub fn ensure_positron_settings(dir: &Path) -> std::io::Result<()> {
     obj.insert(rterm_key, serde_json::Value::String(r_binary_str.clone()));
     obj.insert(rpath_key, serde_json::Value::String(r_binary_str));
 
-    let pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
-    std::fs::write(&settings_path, pretty + "\n")
+    write_settings_json(&settings_path, &json)
+}
+
+/// Serialize `json` and write it to `path`. Serialization happens *before*
+/// the file is opened: a serialization failure must propagate and leave any
+/// existing settings.json untouched, not truncate it to an empty document
+/// the way `unwrap_or_default()` + write used to (#167).
+fn write_settings_json<T: serde::Serialize>(path: &Path, json: &T) -> std::io::Result<()> {
+    let pretty = serde_json::to_string_pretty(json)?;
+    std::fs::write(path, pretty + "\n")
 }
 
 /// Append `value` to the array at `obj[key]` if it isn't already there.
@@ -540,5 +548,41 @@ mod rprofile_tests {
         assert!(!should_hint_unpinned(true, false)); // pinned to system R (#204)
         assert!(!should_hint_unpinned(false, true)); // managed fallback (#75)
         assert!(!should_hint_unpinned(true, true)); // pinned managed install
+    }
+
+    /// A `Serialize` impl that always fails, standing in for the
+    /// (theoretically possible) serde_json failure in #167.
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("forced serialization failure"))
+        }
+    }
+
+    #[test]
+    fn settings_write_serialization_failure_leaves_existing_file_untouched() {
+        // #167: the old `unwrap_or_default()` + write clobbered the user's
+        // .vscode/settings.json with a bare "\n" when serialization failed.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let original = "{\n  \"editor.formatOnSave\": true\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(write_settings_json(&path, &FailingSerialize).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn settings_write_serializes_valid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        let json = serde_json::json!({ "r.rpath.mac": "/usr/local/bin/R" });
+
+        write_settings_json(&path, &json).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.ends_with('\n'));
+        let roundtrip: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(roundtrip, json);
     }
 }
