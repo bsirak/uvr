@@ -102,7 +102,7 @@ async fn resolve_lockfile(
         } else if upgrade {
             // --upgrade re-derives fresh from the active R, ignoring the lock.
             let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
-            let derived = uvr_core::registry::bioconductor::default_release_for_r(r_ver);
+            let derived = uvr_core::registry::bioconductor::release_for_r(client, r_ver).await;
             if actual_r_version.is_none() {
                 tracing::warn!(
                     "R could not be detected; Bioconductor {derived} was derived from a \
@@ -110,27 +110,28 @@ async fn resolve_lockfile(
                      `bioc_version` in uvr.toml to pin the release explicitly."
                 );
             }
-            Some(derived.to_string())
+            Some(derived)
         } else if actual_r_version.is_none() {
             // R couldn't be detected, so we can't validate the locked release
             // against it — reuse the lock as-is (don't churn or warn spuriously);
             // fall back to the derived default only if there's no lock.
-            existing
-                .and_then(|lf| lf.r.bioc_version.as_deref())
-                .map(str::to_string)
-                .or_else(|| {
-                    let derived = uvr_core::registry::bioconductor::default_release_for_r("4.4");
+            match existing.and_then(|lf| lf.r.bioc_version.as_deref()) {
+                Some(locked) => Some(locked.to_string()),
+                None => {
+                    let derived =
+                        uvr_core::registry::bioconductor::release_for_r(client, "4.4").await;
                     tracing::warn!(
                         "R could not be detected and no lockfile records a Bioconductor \
                          release; Bioconductor {derived} was derived from a default of R 4.4 \
                          and may not match your project's R. Set `bioc_version` in uvr.toml \
                          to pin the release explicitly."
                     );
-                    Some(derived.to_string())
-                })
+                    Some(derived)
+                }
+            }
         } else {
             let r_ver = actual_r_version.as_deref().unwrap_or("4.4");
-            let derived = uvr_core::registry::bioconductor::default_release_for_r(r_ver);
+            let derived = uvr_core::registry::bioconductor::release_for_r(client, r_ver).await;
             // Reuse the lockfile's recorded Bioc release only if it still agrees
             // with the release the active R maps to. A lock can carry a release
             // paired with a different R — R was upgraded since locking, or the

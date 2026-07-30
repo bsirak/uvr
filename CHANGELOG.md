@@ -7,6 +7,24 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **The R↔Bioconductor release mapping is now read from Bioconductor**
+  (#120): `uvr lock` fetches `bioconductor.org/config.yaml` (cached for a
+  week) and picks the newest *released* Bioc paired with the active R,
+  excluding the devel branch. The hardcoded table went stale every ~6
+  months — that's what shipped R 4.6 users a release built for R 4.5
+  (#119). It remains as the offline fallback, so locking without a network
+  still works.
+- **`uvr r install` no longer buffers the whole R archive in memory**
+  (#134): the ~200 MB macOS tarball was held in RAM before extraction,
+  OOMing 2 GB CI runners and memory-capped containers. It now streams to a
+  temp file next to the install directory, like package downloads already
+  did.
+- **Concurrent `uvr r install` of the same version no longer fails one
+  side** (#135): parallel CI matrix jobs or `make -j` could both see the
+  version as missing and both install it. The final rename now arbitrates —
+  the process that loses adopts the completed install instead of erroring
+  and orphaning its staging directory. A concurrent `r uninstall` of an
+  already-removed version is likewise no longer an error.
 - **P3M Linux binaries with bundled shared libraries now extract** (#203):
   archives built by R's internal tar record the link target's size on
   symlink headers; the Rust tar crate trusted that field, skipped megabytes

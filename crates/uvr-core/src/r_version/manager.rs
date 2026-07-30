@@ -80,9 +80,20 @@ impl RManager {
                 }
             }
         }
-        std::fs::remove_dir_all(&install_dir).map_err(|e| {
-            UvrError::Other(format!("Failed to remove {}: {e}", install_dir.display()))
-        })?;
+        // A concurrent uninstall of the same version can win the race between
+        // the `exists()` check above and this removal (#135). The end state
+        // the caller asked for is "gone", and it is — so a vanished directory
+        // is success, not an error.
+        match std::fs::remove_dir_all(&install_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(UvrError::Other(format!(
+                    "Failed to remove {}: {e}",
+                    install_dir.display()
+                )))
+            }
+        }
         Ok(install_dir)
     }
 }
