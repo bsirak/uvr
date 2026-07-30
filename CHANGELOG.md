@@ -7,6 +7,33 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **P3M Linux binaries with bundled shared libraries now extract** (#203):
+  archives built by R's internal tar record the link target's size on
+  symlink headers; the Rust tar crate trusted that field, skipped megabytes
+  of phantom data, and failed mid-archive with "numeric field was not a
+  number ... when getting cksum" (RcppParallel's TBB libs, and any package
+  vendoring `.so` files). uvr now normalizes link-entry sizes before
+  parsing, and extracts the symlinks themselves (relative, non-escaping
+  targets only) instead of silently dropping them.
+- **Binary installs are verified before reporting success** (#203): an
+  extracted package must contain `Meta/package.rds` (present in every built
+  package, never in a source tree). A source tarball served where a binary
+  was expected — or a truncated extraction — previously landed in the
+  library as an unloadable package with a green "Installed" line (duckdb);
+  it is now a hard error pointing at `--ignore-cache` / `--no-binary`.
+- **Corporate/self-signed CAs from the OS trust store are now accepted**
+  (#201, #200): all downloads validate TLS against the platform trust store
+  in addition to the bundled webpki roots, so TLS-inspecting proxies whose
+  CA is installed system-wide (the setup where `curl` works but uvr failed
+  with "invalid peer certificate: UnknownIssuer") work without a separate
+  native-tls binary. `SSL_CERT_FILE` is honored for CAs not in the store.
+- **No more per-package sysreqs warnings for Bioconductor packages** (#202):
+  the Posit sysreqs API only covers CRAN and returns HTTP 500 for every
+  Bioc name — ~100 WARN lines on a Bioc-heavy sync. Bioc packages now check
+  the vendored local rules directly, no API call, no warning.
+- The "No .r-version pin — IDE config bound to system R" hint no longer
+  prints when a `.r-version` pin exists (#204): pinning to the system R is
+  a valid, intentional setup (CI images), and the message was simply false.
 - **Unknown Linux distros no longer install incompatible binaries** (#175):
   uvr treated any unrecognized distro as Ubuntu 22.04 and installed P3M's
   jammy binaries. On Arch those link `libxml2.so.2` against a system shipping

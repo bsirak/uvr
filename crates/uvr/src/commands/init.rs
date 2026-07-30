@@ -339,9 +339,11 @@ fn resolve_project_r_binary(dir: &Path) -> Option<std::path::PathBuf> {
 
     // Prefer the explicit pin in `dir/.r-version` if it points at a
     // uvr-managed install we can verify on disk.
+    let mut has_pin = false;
     if let Ok(pin) = std::fs::read_to_string(dir.join(R_VERSION_FILE)) {
         let pin = pin.trim();
         if !pin.is_empty() {
+            has_pin = true;
             if let Some(home) = dirs::home_dir() {
                 let candidate = home
                     .join(".uvr")
@@ -360,25 +362,33 @@ fn resolve_project_r_binary(dir: &Path) -> Option<std::path::PathBuf> {
         }
     }
 
-    // No pin (or pin not yet installed) — fall through to whatever uvr
-    // would find on the system. Surface the fallback ONLY when it
-    // resolves to a non-uvr-managed R (e.g. system R on PATH) — that's
-    // the case worth nagging about, since system R can be removed or
-    // upgraded out from under the IDE config. When the fallback is a
-    // uvr-managed install, the binding is sound and the prior nag was
-    // a false-positive that fired on every fresh `uvr init` (#75).
+    // No managed pin — fall through to whatever uvr would find on the
+    // system. Surface the fallback ONLY when it resolves to a non-uvr-
+    // managed R (e.g. system R on PATH) AND there is genuinely no pin —
+    // that's the case worth nagging about, since system R can be removed
+    // or upgraded out from under the IDE config. When the fallback is a
+    // uvr-managed install the binding is sound (#75); and when a
+    // `.r-version` pin exists — even one satisfied by the system R, a
+    // valid, intentional setup in CI — saying "No .r-version pin" is
+    // simply false (#204).
     let fallback = find_r_binary(None).ok()?;
     let managed_root = dirs::home_dir().map(|h| h.join(".uvr").join("r-versions"));
     let is_managed = managed_root
         .as_ref()
         .is_some_and(|root| fallback.starts_with(root));
-    if !is_managed {
+    if should_hint_unpinned(has_pin, is_managed) {
         ui::bullet_dim(format!(
             "No .r-version pin — IDE config bound to system R at {}. Run `uvr r install <ver>` then `uvr r pin <ver>` for project-pinned R.",
             fallback.display()
         ));
     }
     Some(fallback)
+}
+
+/// Whether to print the "No .r-version pin" hint: only when there is truly
+/// no pin and the resolved R is not uvr-managed (#75, #204).
+fn should_hint_unpinned(has_pin: bool, is_managed: bool) -> bool {
+    !has_pin && !is_managed
 }
 
 /// Returns true if `dir` looks like an R package source tree — DESCRIPTION
@@ -520,5 +530,15 @@ mod rprofile_tests {
     fn is_r_package_dir_false_without_description() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(!is_r_package_dir(tmp.path()));
+    }
+
+    #[test]
+    fn unpinned_hint_fires_only_without_a_pin_on_unmanaged_r() {
+        // #204: a `.r-version` pin satisfied by the system R is a valid,
+        // intentional setup (CI images) — "No .r-version pin" must not print.
+        assert!(should_hint_unpinned(false, false)); // truly unpinned system R
+        assert!(!should_hint_unpinned(true, false)); // pinned to system R (#204)
+        assert!(!should_hint_unpinned(false, true)); // managed fallback (#75)
+        assert!(!should_hint_unpinned(true, true)); // pinned managed install
     }
 }

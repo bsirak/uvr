@@ -408,6 +408,7 @@ fn extract_zip(zip_path: &Path, library: &Path, package_name: &str) -> Result<()
             package_name, package_name
         )));
     }
+    verify_built_package(&staged_pkg, package_name)?;
     remove_dir_with_retry(&final_dest);
     rename_or_copy_dir(&staged_pkg, &final_dest).map_err(|e| {
         UvrError::Other(format!(
@@ -479,13 +480,73 @@ fn extract_entry<R: std::io::Read>(
                 ))
             })?;
         }
-        // Skip all other entry types — symlinks, hardlinks, devices, FIFOs,
-        // GNU extension headers, PAX globals, etc. R packages don't use them
-        // in practice; tarballs from `R CMD INSTALL --build` produce only
-        // regular files and directories.
+        // Symlinks: P3M Linux binaries bundle vendored shared libraries with
+        // SONAME symlinks (RcppParallel's libtbb.so -> libtbb.so.2, #203).
+        // Create them on Unix; only relative, non-escaping targets are
+        // allowed — anything else is skipped, matching the old behavior for
+        // suspicious entries. On Windows symlink creation needs privileges
+        // and Windows binary packages are zips, so tgz symlinks stay skipped.
+        #[cfg(unix)]
+        tar::EntryType::Symlink => {
+            let Some(target) = entry.link_name().ok().flatten().map(|t| t.into_owned()) else {
+                return Ok(());
+            };
+            let escapes = target.is_absolute()
+                || target
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir);
+            if escapes {
+                return Ok(());
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    UvrError::Other(format!(
+                        "Failed to create parent directory for '{}' in '{}': {} ({:?})",
+                        archive_path.display(),
+                        package_name,
+                        e,
+                        e.kind()
+                    ))
+                })?;
+            }
+            let _ = std::fs::remove_file(dest);
+            std::os::unix::fs::symlink(&target, dest).map_err(|e| {
+                UvrError::Other(format!(
+                    "Failed to create symlink '{}' -> '{}' in '{}': {} ({:?})",
+                    archive_path.display(),
+                    target.display(),
+                    package_name,
+                    e,
+                    e.kind()
+                ))
+            })?;
+        }
+        // Skip all other entry types — hardlinks, devices, FIFOs, GNU
+        // extension headers, PAX globals, etc. R packages don't use them in
+        // practice; tarballs from `R CMD INSTALL --build` produce only
+        // regular files, directories, and (on Linux) SONAME symlinks.
         _ => {}
     }
     Ok(())
+}
+
+/// Validate that an extracted package is actually a *built* (installed)
+/// package before it reaches the library. Every properly built R package —
+/// binary tarball or zip — contains `Meta/package.rds`; a source tree never
+/// does. Without this, a source tarball served where a binary was expected,
+/// or a truncated extraction, lands in the library, reports success, and only
+/// fails at a later `library()` call, possibly in a different session
+/// entirely (#203, duckdb).
+fn verify_built_package(staged_pkg: &Path, package_name: &str) -> Result<()> {
+    if staged_pkg.join("Meta").join("package.rds").exists() {
+        return Ok(());
+    }
+    Err(UvrError::Other(format!(
+        "Archive for '{package_name}' is not a built binary package (no \
+         Meta/package.rds — a source tarball served as binary, or a truncated \
+         download). Retry with `uvr sync --ignore-cache`, or force a source \
+         build with `uvr sync --no-binary`."
+    )))
 }
 
 /// Extract a `.tgz` binary package into the library directory.
@@ -496,7 +557,10 @@ fn extract_entry<R: std::io::Read>(
 fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()> {
     let file = std::fs::File::open(tgz_path)?;
     let decoder = GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    // LinkSizeFix: P3M Linux binaries are built with R's internal tar, which
+    // records the target size on symlink entries; the tar crate would skip
+    // that many phantom bytes and fail mid-archive (#203).
+    let mut archive = tar::Archive::new(super::tar_compat::LinkSizeFix::new(decoder));
     // NOTE: archive metadata-preservation settings are unused because
     // extract_entry does manual file creation. R packages have no
     // meaningful mtime/permissions to preserve.
@@ -576,6 +640,7 @@ fn extract_tgz(tgz_path: &Path, library: &Path, package_name: &str) -> Result<()
             package_name, package_name
         )));
     }
+    verify_built_package(&staged_pkg, package_name)?;
     remove_dir_with_retry(&final_dest);
     rename_or_copy_dir(&staged_pkg, &final_dest).map_err(|e| {
         UvrError::Other(format!(
@@ -612,7 +677,10 @@ pub fn inspect_tarball(tarball_path: &Path, package_name: &str) -> Option<Tarbal
     use std::io::Read;
     let file = std::fs::File::open(tarball_path).ok()?;
     let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    // LinkSizeFix: same R-internal-tar quirk as extract_tgz (#203) — without
+    // it, iteration aborts at the first symlink and DESCRIPTION lookups that
+    // land after one silently misclassify the tarball.
+    let mut archive = tar::Archive::new(super::tar_compat::LinkSizeFix::new(decoder));
     let want = format!("{package_name}/DESCRIPTION");
 
     for entry in archive.entries().ok()?.flatten() {
@@ -802,8 +870,25 @@ mod tests {
             .unwrap();
         zip.write_all(b"hello <- function() 'world'\n").unwrap();
 
+        // Built packages always carry Meta/package.rds; extraction verifies it.
+        zip.start_file(format!("{pkg_name}/Meta/package.rds"), options)
+            .unwrap();
+        zip.write_all(b"fake rds").unwrap();
+
         zip.finish().unwrap();
         zip_path
+    }
+
+    /// Append the `Meta/package.rds` entry every built package carries (and
+    /// `extract_*` now verifies) to a test tar builder.
+    fn append_meta_rds<W: std::io::Write>(builder: &mut tar::Builder<W>, pkg: &str) {
+        let rds = b"fake rds";
+        let mut h = tar::Header::new_gnu();
+        h.set_path(format!("{pkg}/Meta/package.rds")).unwrap();
+        h.set_size(rds.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        builder.append(&h, &rds[..]).unwrap();
     }
 
     #[test]
@@ -848,6 +933,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(r_dir.join("hello.R"), "hello <- function() 1\n").unwrap();
+        let meta_dir = pkg_dir.join("Meta");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        std::fs::write(meta_dir.join("package.rds"), b"fake rds").unwrap();
 
         let tarball = dir.path().join("tarpkg_1.0.0.tgz");
         let status = std::process::Command::new("tar")
@@ -1018,6 +1106,7 @@ mod tests {
                 header.set_cksum();
                 builder.append(&header, &bytes[..]).unwrap();
 
+                append_meta_rds(&mut builder, "t17pkg");
                 builder.finish().unwrap();
             }
             enc.finish().unwrap();
@@ -1037,9 +1126,10 @@ mod tests {
     }
 
     #[test]
-    fn extract_tgz_skips_symlinks() {
-        // Build a tarball with a regular file and a symlink. Verify the
-        // regular file extracts and the symlink is silently skipped.
+    fn extract_tgz_extracts_relative_symlinks() {
+        // Build a tarball with a regular file and a symlink. Verify both
+        // extract on Unix (P3M binaries need SONAME symlinks, #203); on
+        // Windows the symlink is skipped.
         use flate2::write::GzEncoder;
         use flate2::Compression;
         use tempfile::TempDir;
@@ -1071,19 +1161,150 @@ mod tests {
                 sym_header.set_cksum();
                 builder.append(&sym_header, std::io::empty()).unwrap();
 
+                append_meta_rds(&mut builder, "t18pkg");
                 builder.finish().unwrap();
             }
             enc.finish().unwrap();
         }
 
         let library = TempDir::new().unwrap();
-        extract_tgz(tarball.path(), library.path(), "t18pkg")
-            .expect("should succeed despite symlink");
+        extract_tgz(tarball.path(), library.path(), "t18pkg").expect("should succeed with symlink");
         let extracted = library.path().join("t18pkg").join("DESCRIPTION");
         assert!(extracted.exists());
-        // Symlink should not have been extracted.
         let sym = library.path().join("t18pkg").join("link");
-        assert!(!sym.exists(), "symlink should be silently skipped");
+        #[cfg(unix)]
+        {
+            assert!(
+                sym.symlink_metadata().is_ok(),
+                "symlink should be extracted on unix"
+            );
+            assert_eq!(
+                std::fs::read_link(&sym).unwrap(),
+                std::path::PathBuf::from("DESCRIPTION")
+            );
+            // And it resolves to real content.
+            assert!(std::fs::read_to_string(&sym).unwrap().contains("t18pkg"));
+        }
+        #[cfg(not(unix))]
+        assert!(!sym.exists(), "symlink should be skipped on non-unix");
+    }
+
+    #[test]
+    fn extract_tgz_handles_r_internal_tar_symlink_sizes_end_to_end() {
+        // Regression for #203 (RcppParallel on P3M RHEL9): R's internal tar
+        // records the link target's size on symlink headers. Build the same
+        // shape raw (the tar crate's Builder won't write it), then prove
+        // extract_tgz handles it: parses past the symlink, creates it, and
+        // extracts the entries after it.
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tempfile::TempDir;
+
+        fn raw_file(path: &str, content: &[u8]) -> Vec<u8> {
+            let mut h = tar::Header::new_gnu();
+            h.set_path(path).unwrap();
+            h.set_size(content.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            let mut out = Vec::new();
+            out.extend_from_slice(h.as_bytes());
+            out.extend_from_slice(content);
+            out.extend(std::iter::repeat_n(0u8, (512 - content.len() % 512) % 512));
+            out
+        }
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&raw_file("t23pkg/DESCRIPTION", b"Package: t23pkg\n"));
+        raw.extend_from_slice(&raw_file("t23pkg/Meta/package.rds", b"fake rds"));
+        let mut sym = tar::Header::new_gnu();
+        sym.set_path("t23pkg/lib/libtbb.so").unwrap();
+        sym.set_entry_type(tar::EntryType::Symlink);
+        sym.set_link_name("libtbb.so.2").unwrap();
+        sym.set_size(5_078_648); // R-internal-tar quirk: target's size
+        sym.set_cksum();
+        raw.extend_from_slice(sym.as_bytes());
+        raw.extend_from_slice(&raw_file("t23pkg/lib/libtbb.so.2", b"fake so bytes"));
+        raw.extend(std::iter::repeat_n(0u8, 1024));
+
+        let tarball = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut enc = GzEncoder::new(
+                std::fs::File::create(tarball.path()).unwrap(),
+                Compression::default(),
+            );
+            std::io::Write::write_all(&mut enc, &raw).unwrap();
+            enc.finish().unwrap();
+        }
+
+        let library = TempDir::new().unwrap();
+        extract_tgz(tarball.path(), library.path(), "t23pkg")
+            .expect("R-internal-tar symlink sizes must not break extraction");
+        let pkg = library.path().join("t23pkg");
+        assert!(pkg.join("DESCRIPTION").exists());
+        assert!(
+            pkg.join("lib/libtbb.so.2").exists(),
+            "entry after the bogus symlink must extract"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read_link(pkg.join("lib/libtbb.so")).unwrap(),
+            std::path::PathBuf::from("libtbb.so.2")
+        );
+    }
+
+    #[test]
+    fn extract_tgz_skips_escaping_symlinks() {
+        // Symlinks with absolute or parent-escaping targets are skipped.
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tempfile::TempDir;
+
+        let tarball = tempfile::NamedTempFile::new().unwrap();
+        let bytes = b"Package: t24pkg\n";
+        {
+            let mut enc = GzEncoder::new(
+                std::fs::File::create(tarball.path()).unwrap(),
+                Compression::default(),
+            );
+            {
+                let mut builder = tar::Builder::new(&mut enc);
+                let mut header = tar::Header::new_gnu();
+                header.set_path("t24pkg/DESCRIPTION").unwrap();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append(&header, &bytes[..]).unwrap();
+
+                for (name, target) in [
+                    ("t24pkg/abs", "/etc/passwd"),
+                    ("t24pkg/up", "../../outside"),
+                ] {
+                    let mut s = tar::Header::new_gnu();
+                    s.set_path(name).unwrap();
+                    s.set_entry_type(tar::EntryType::Symlink);
+                    s.set_link_name(target).unwrap();
+                    s.set_size(0);
+                    s.set_cksum();
+                    builder.append(&s, std::io::empty()).unwrap();
+                }
+                append_meta_rds(&mut builder, "t24pkg");
+                builder.finish().unwrap();
+            }
+            enc.finish().unwrap();
+        }
+
+        let library = TempDir::new().unwrap();
+        extract_tgz(tarball.path(), library.path(), "t24pkg").expect("should succeed");
+        let pkg = library.path().join("t24pkg");
+        assert!(pkg.join("DESCRIPTION").exists());
+        assert!(
+            pkg.join("abs").symlink_metadata().is_err(),
+            "absolute-target symlink must be skipped"
+        );
+        assert!(
+            pkg.join("up").symlink_metadata().is_err(),
+            "parent-escaping symlink must be skipped"
+        );
     }
 
     #[test]
@@ -1110,6 +1331,7 @@ mod tests {
                 header.set_mode(0o644);
                 header.set_cksum();
                 builder.append(&header, &bytes[..]).unwrap();
+                append_meta_rds(&mut builder, "t18b");
                 builder.finish().unwrap();
             }
             enc.finish().unwrap();
@@ -1126,6 +1348,60 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&extracted).unwrap(),
             "Package: t18b\nVersion: 2.0\n"
+        );
+    }
+
+    #[test]
+    fn extract_tgz_rejects_source_tree_served_as_binary() {
+        // Regression for #203 (duckdb): a source tarball extracted down the
+        // binary path (no Meta/package.rds) must fail loudly instead of
+        // landing an unusable package and reporting success — and the
+        // library must be left untouched.
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tempfile::TempDir;
+
+        let tarball = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut enc = GzEncoder::new(
+                std::fs::File::create(tarball.path()).unwrap(),
+                Compression::default(),
+            );
+            {
+                let mut builder = tar::Builder::new(&mut enc);
+                // Source-tree shape: DESCRIPTION + src/, no Meta/.
+                for (path, content) in [
+                    ("srcpkg/DESCRIPTION", &b"Package: srcpkg\n"[..]),
+                    ("srcpkg/src/code.cpp", &b"// not built"[..]),
+                    ("srcpkg/configure", &b"#!/bin/sh"[..]),
+                ] {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_path(path).unwrap();
+                    h.set_size(content.len() as u64);
+                    h.set_mode(0o644);
+                    h.set_cksum();
+                    builder.append(&h, content).unwrap();
+                }
+                builder.finish().unwrap();
+            }
+            enc.finish().unwrap();
+        }
+
+        let library = TempDir::new().unwrap();
+        let err = extract_tgz(tarball.path(), library.path(), "srcpkg")
+            .expect_err("source tree must not install as binary");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Meta/package.rds"),
+            "error should name the missing marker, got: {msg}"
+        );
+        assert!(
+            msg.contains("--no-binary"),
+            "error should point at the escape hatch, got: {msg}"
+        );
+        assert!(
+            !library.path().join("srcpkg").exists(),
+            "failed install must not leave a package dir behind"
         );
     }
 

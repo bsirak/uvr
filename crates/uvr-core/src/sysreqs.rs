@@ -200,6 +200,11 @@ pub struct PackageSysReqQuery {
     /// when the Posit API rejects the distribution and we fall back to
     /// the vendored `r-system-requirements` rules locally.
     pub system_requirements: Option<String>,
+    /// True for Bioconductor-sourced packages. The Posit sysreqs API only
+    /// covers CRAN and returns HTTP 500 for Bioc names, so querying it is a
+    /// guaranteed per-package WARN with zero information (#202) — Bioc
+    /// packages go straight to the vendored local rules instead.
+    pub bioc: bool,
 }
 
 /// Resolve and check system dependencies for a set of packages.
@@ -227,6 +232,13 @@ pub async fn check_system_deps(
     let mut tail_start: usize = 0;
 
     for (idx, pkg) in packages.iter().enumerate() {
+        // The Posit API is CRAN-only; Bioc names 500 every time. Check them
+        // against the vendored local rules directly — no request, no WARN,
+        // and no degraded-check flag, since nothing actually degraded (#202).
+        if pkg.bioc {
+            check_pkg_local(&mut out, pkg, distro);
+            continue;
+        }
         match resolve_system_deps(client, &pkg.name, distro).await {
             Ok(SysReqLookup::Supported(resolved)) => {
                 let missing = filter_missing(&resolved);
@@ -291,6 +303,34 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bioc_packages_skip_the_posit_api_entirely() {
+        // #202: the Posit sysreqs API 500s for every Bioc name. Bioc-flagged
+        // queries must go straight to local rules: no request is made, so
+        // neither lookup_failed (API contact failed) nor unsupported_distro
+        // can be set — on any machine, online or offline. If this test hangs
+        // or flags lookup_failed, the API skip regressed.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let queries = vec![
+            PackageSysReqQuery {
+                name: "SummarizedExperiment".into(),
+                system_requirements: None,
+                bioc: true,
+            },
+            PackageSysReqQuery {
+                name: "Rhtslib".into(),
+                system_requirements: Some("libbz2 & liblzma & GNU make".into()),
+                bioc: true,
+            },
+        ];
+        let check = check_system_deps(&client, &queries, "ubuntu-22.04").await;
+        assert!(!check.lookup_failed, "no API contact → no failed lookups");
+        assert!(!check.unsupported_distro);
+    }
 
     #[test]
     fn detect_distro_format() {

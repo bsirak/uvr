@@ -523,6 +523,7 @@ async fn install_from_lockfile_with_r(
                 .map(|p| sysreqs::PackageSysReqQuery {
                     name: p.name.clone(),
                     system_requirements: p.system_requirements.clone(),
+                    bioc: matches!(p.source, uvr_core::lockfile::PackageSource::Bioconductor),
                 })
                 .collect();
 
@@ -1312,7 +1313,18 @@ fn try_install_companion(
     // Download if cached tarball is missing (pinned SHA = immutable, no TTL needed).
     if !tarball.exists() {
         let url = format!("https://api.github.com/repos/nbafrank/uvr-r/tarball/{COMPANION_SHA}");
-        let resp = ureq::get(&url).header("User-Agent", "uvr").call()?;
+        // Platform verifier: trust the OS store (incl. corporate
+        // TLS-inspection CAs) like every other uvr download does via
+        // reqwest's native-roots (#201).
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                    .build(),
+            )
+            .build()
+            .into();
+        let resp = agent.get(&url).header("User-Agent", "uvr").call()?;
         let bytes = resp.into_body().read_to_vec()?;
         std::fs::write(tarball, &bytes)?;
     }
