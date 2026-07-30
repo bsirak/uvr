@@ -203,7 +203,10 @@ async fn resolve_lockfile(
     // contains ghost entries for Bioc-origin packages (e.g. S4Vectors for
     // future R versions) that have no real tarball; Bioc is authoritative
     // for its own packages.
-    let mut lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {
+    // The resolver records the Bioconductor release in the lockfile so it's
+    // fully self-describing (#153).
+    let resolved_bioc = bioc_opt.as_ref().map(|b| b.release());
+    let lockfile = if !custom_registries.is_empty() || bioc_opt.is_some() {
         let mut chain: Vec<&dyn PackageRegistry> = Vec::new();
         for reg in &custom_registries {
             chain.push(reg);
@@ -214,18 +217,23 @@ async fn resolve_lockfile(
         chain.push(&cran);
         let registry = RegistryChain::new(chain);
         Resolver::new(&registry)
-            .resolve(&project.manifest, actual_r_version.as_deref(), pre_resolved)
+            .resolve(
+                &project.manifest,
+                actual_r_version.as_deref(),
+                resolved_bioc,
+                pre_resolved,
+            )
             .context("Dependency resolution failed")?
     } else {
         Resolver::new(&cran)
-            .resolve(&project.manifest, actual_r_version.as_deref(), pre_resolved)
+            .resolve(
+                &project.manifest,
+                actual_r_version.as_deref(),
+                resolved_bioc,
+                pre_resolved,
+            )
             .context("Dependency resolution failed")?
     };
-
-    // Record the Bioconductor release in the lockfile so it's fully self-describing.
-    if let Some(ref bioc) = bioc_opt {
-        lockfile.r.bioc_version = Some(bioc.release().to_string());
-    }
 
     spinner.finish_and_clear();
     Ok(lockfile)

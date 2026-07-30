@@ -229,9 +229,33 @@ pub fn pin_conflicts_with_constraint(resolved_version: &str, constraint: &str) -
     }
 }
 
+/// Compare two version strings with R's semantics: `.` and `-` both separate
+/// components (`1.2-7` == `1.2.7`), and missing trailing components count as
+/// zero (`4.5` == `4.5.0`). A non-numeric tail (`4.5.0-rc1`, `4.5.0alpha`)
+/// marks a pre-release that sorts below the plain release. The old `Vec<u32>`
+/// comparison got both wrong — shorter Vecs sorted first, and non-numeric
+/// parts were silently dropped, tying `4.5.0-rc1` with `4.5.0` (#157).
 fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse = |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse().ok()).collect() };
-    parse(a).cmp(&parse(b))
+    // (numeric components, has a non-numeric tail). Parsing stops at the
+    // first non-numeric part; everything after it is just a pre-release
+    // marker, not compared further.
+    let parse = |s: &str| -> (Vec<u32>, bool) {
+        let mut nums = Vec::new();
+        for part in s.split(['.', '-']) {
+            match part.parse() {
+                Ok(n) => nums.push(n),
+                Err(_) => return (nums, true),
+            }
+        }
+        (nums, false)
+    };
+    let (mut va, pre_a) = parse(a);
+    let (mut vb, pre_b) = parse(b);
+    let len = va.len().max(vb.len());
+    va.resize(len, 0);
+    vb.resize(len, 0);
+    // On equal numeric components the pre-release (true) sorts lower.
+    va.cmp(&vb).then(pre_b.cmp(&pre_a))
 }
 
 /// True when `s` has the shape of an R version a user may type: 2–4
@@ -407,6 +431,35 @@ mod tests {
         assert!(!is_plausible_r_version(""));
         assert!(!is_plausible_r_version("4.5.1.2.3"));
         assert!(!is_plausible_r_version(">=4.5"));
+    }
+
+    #[test]
+    fn version_cmp_r_semantics() {
+        use std::cmp::Ordering::*;
+        // #157: unequal lengths used to sort the shorter Vec first, and
+        // non-numeric tails were dropped so pre-releases tied with releases.
+        let cases = [
+            // Missing components are zero.
+            ("4.5", "4.5.0", Equal),
+            ("4.5.0", "4.5", Equal),
+            ("4.5", "4.5.1", Less),
+            ("4.5.1", "4.5", Greater),
+            // `-` is a component separator, as in package versions.
+            ("1.2-7", "1.2.7", Equal),
+            ("1.2-7", "1.2-6", Greater),
+            // Numeric, not lexicographic.
+            ("4.10.0", "4.9.9", Greater),
+            // A non-numeric tail is a pre-release, below the plain release.
+            ("4.5.0-rc1", "4.5.0", Less),
+            ("4.5.0", "4.5.0-rc1", Greater),
+            ("4.5.0alpha", "4.5.0", Less),
+            ("4.5.1-rc1", "4.5.0", Greater),
+            // Tails are markers only; two pre-releases of one base tie.
+            ("4.5.0-rc1", "4.5.0-rc2", Equal),
+        ];
+        for (a, b, want) in cases {
+            assert_eq!(version_cmp(a, b), want, "version_cmp({a:?}, {b:?})");
+        }
     }
 
     #[test]

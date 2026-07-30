@@ -170,11 +170,15 @@ pub fn read_entry_meta(entry_dir: &Path) -> Option<EntryMeta> {
     EntryMeta::from_file_contents(&contents)
 }
 
-/// Look up a package in the global cache, trying both binary and source keys.
+/// Look up a package in the global cache.
 ///
-/// Returns `Some((path, is_binary))` if found. Tries the `is_binary` variant
-/// first, then the opposite — this handles the case where P3M reported a
-/// binary URL but the download fell back to source (or vice versa).
+/// Returns the cached package directory if found. When `binary_allowed`, the
+/// binary key is probed first, then the source key — this handles the case
+/// where P3M reported a binary URL but the download fell back to source. Both
+/// kinds are safe to serve then: the source entry was built on this same
+/// host/R-minor/libR configuration (it's part of the key). When binaries are
+/// unusable here (`--no-binary`, unrecognized distro) only the source key is
+/// probed (#165, #175 — see below).
 pub fn lookup_any(
     name: &str,
     version: &str,
