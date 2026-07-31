@@ -109,7 +109,9 @@ build_prereqs() {
         apt-get) echo "build-essential pkg-config" ;;
         dnf|yum|microdnf) echo "gcc gcc-c++ make pkgconf-pkg-config" ;;
         zypper) echo "gcc gcc-c++ make pkg-config" ;;
-        apk) echo "build-base musl-dev" ;;
+        # build-base does not pull pkgconf on Alpine, and R's anticonf
+        # configure scripts need it to find libxml-2.0.
+        apk) echo "build-base musl-dev pkgconf" ;;
         pacman) echo "gcc make pkgconf" ;;
     esac
 }
@@ -200,7 +202,15 @@ fi
 # There is still no compiler on this image, so a "binary" install that quietly
 # falls back to a source build fails here instead of passing for the wrong
 # reason.
-if ! skipped binary; then
+#
+# musl hosts sit this one out: P3M publishes no musl repo and the portable
+# manylinux fallback needs glibc, so there is no binary to select and `uvr add`
+# correctly compiles from source — which is the *next* stage's subject, on an
+# image that by then has a compiler. Alpine's coverage is the sysreqs path
+# (#30), not this one.
+if [ "$libc" = musl ]; then
+    note "skipping the binary stage: no binary repo exists for musl"
+elif ! skipped binary; then
     group "Binary package install ($SMOKE_PKG)"
     work=/tmp/binary-smoke
     rm -rf "$work" && mkdir -p "$work" && cd "$work"

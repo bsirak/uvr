@@ -518,7 +518,8 @@
         "release": "3.20.10",
         "api": false,
         "local": true
-      }
+      },
+      "known_failure": "#207: CRAN PACKAGES carries no SystemRequirements, so the local-rules fallback resolves nothing — and the local rules are the only sysreqs source on Alpine. Reproduced by the sysreqs stage: xml2 fails to build with libxml2-dev never installed and no warning printed."
     },
     {
       "key": "alpine-321",
@@ -538,7 +539,8 @@
         "release": "3.21.7",
         "api": false,
         "local": true
-      }
+      },
+      "known_failure": "#207: CRAN PACKAGES carries no SystemRequirements, so the local-rules fallback resolves nothing — and the local rules are the only sysreqs source on Alpine. Reproduced by the sysreqs stage: xml2 fails to build with libxml2-dev never installed and no warning printed."
     },
     {
       "key": "alpine-322",
@@ -557,7 +559,8 @@
         "release": "3.22.5",
         "api": false,
         "local": true
-      }
+      },
+      "known_failure": "#207: CRAN PACKAGES carries no SystemRequirements, so the local-rules fallback resolves nothing — and the local rules are the only sysreqs source on Alpine. Reproduced by the sysreqs stage: xml2 fails to build with libxml2-dev never installed and no warning printed."
     },
     {
       "key": "amazonlinux-2023",
