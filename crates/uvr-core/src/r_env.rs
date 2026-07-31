@@ -189,8 +189,10 @@ mod tests {
         // user whose ~/.Renviron sets R_LIBS_USER silently gets their own
         // library instead of the project's — verified against real R.
         assert_eq!(get("R_ENVIRON_USER"), "");
-        assert_eq!(get("DYLD_LIBRARY_PATH"), "/opt/R/4.4.2/lib");
-        assert_eq!(get("LD_LIBRARY_PATH"), "/opt/R/4.4.2/lib");
+        let lib = PathBuf::from("/opt/R/4.4.2").join("lib");
+        let lib = lib.to_string_lossy();
+        assert_eq!(get("DYLD_LIBRARY_PATH"), lib);
+        assert_eq!(get("LD_LIBRARY_PATH"), lib);
     }
 
     #[test]

@@ -92,7 +92,9 @@ jobs:
         run: |
           set -euxo pipefail
           latest="${R_VERSIONS##* }"
-          export PATH="$HOME/.uvr/r-versions/$latest/bin:$PATH"
+          # Windows portable builds put R.exe under bin/ and bin/x64/.
+          rroot="$HOME/.uvr/r-versions/$latest"
+          export PATH="$rroot/bin:$rroot/bin/x64:$PATH"
           R --version
           cargo test --test cli_tests activate
 
