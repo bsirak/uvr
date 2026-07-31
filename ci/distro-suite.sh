@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run uvr's full test suite natively inside one Linux distribution.
+# Exercise a *released* uvr binary in one Linux distribution.
 #
 # Invoked by .github/workflows/distro-suite.yml, once per image in
 # crates/uvr-core/tests/distro_matrix.json, via:
@@ -8,23 +8,28 @@
 #
 # `docker run` rather than a `container:` job on purpose: node-based actions
 # need a glibc the minimal and musl images don't have, so the checkout happens
-# on the host and the source tree is mounted in. One shape for every image.
+# on the host and the tree is mounted in. One shape for every image.
 #
-# Everything is compiled and executed with the distro's own toolchain against
-# its own libc — cross-compiled or statically linked binaries would test the
-# build host, which is the opposite of the point.
+# This deliberately does not build uvr here. Users don't cargo build it —
+# install.sh drops a release binary onto their machine — so the artifact under
+# test is the one that ships, selected by the same libc rule install.sh uses.
+# Building from source in each container would paper over exactly the failures
+# that matter: a gnu binary whose glibc floor is above what the distro ships,
+# or a musl binary picked on a glibc host.
 #
 # Env:
+#   DIST         directory of release builds (default: ./dist)
 #   R_VERSIONS   space-separated R versions to install (default: 4.5.1)
 #   SMOKE_PKG    package with an external system library (default: xml2)
 #   SKIP_STAGES  space-separated stage names to skip (default: none)
 set -eu
 
+DIST="${DIST:-./dist}"
 R_VERSIONS="${R_VERSIONS:-4.5.1}"
 SMOKE_PKG="${SMOKE_PKG:-xml2}"
 SKIP_STAGES="${SKIP_STAGES:-}"
 R_LATEST="${R_VERSIONS##* }"
-# Where the source tree is mounted; stages cd into scratch projects and back.
+# Where the tree is mounted; stages cd into scratch projects and back.
 ROOT="$(pwd)"
 
 # ---------------------------------------------------------------- helpers ---
@@ -79,29 +84,41 @@ pm_refresh() {
     esac
 }
 
-# Base prerequisites, per family:
-#   compiler + make + pkg-config  build uvr and any source R package
-#   ca-certificates               rustup, the R tarball, CRAN over TLS
-#   fontconfig (+ a font on musl) R's graphics device probes these at startup
-#   libxml2 runtime               load the binary SMOKE_PKG
-# Deliberately absent: libxml2's *headers*. Their absence is what the sysreqs
-# stage below is testing.
-prereqs() {
+# Runtime only — what a user has before they compile anything:
+#   ca-certificates                TLS to the CDN and CRAN
+#   fontconfig (+ a font on musl)  R probes these at startup
+#   which                          R's `utils` calls system(which ...) in
+#                                  .onLoad and fails to load without it; the
+#                                  minimal RPM images ship no `which`, Debian
+#                                  and busybox do
+#   libxml2 runtime                load the binary SMOKE_PKG
+# Deliberately absent: a compiler, and libxml2's *headers*. The stages below
+# run on a bare image precisely to prove the shipped binary needs neither.
+runtime_prereqs() {
     case "$PM" in
-        apt-get) echo "build-essential pkg-config ca-certificates fontconfig libxml2 procps" ;;
-        dnf|yum|microdnf) echo "gcc gcc-c++ make pkgconf-pkg-config which ca-certificates fontconfig libxml2 findutils" ;;
-        zypper) echo "gcc gcc-c++ make pkg-config which ca-certificates fontconfig libxml2-2" ;;
-        apk) echo "build-base musl-dev ca-certificates fontconfig ttf-dejavu libxml2" ;;
-        pacman) echo "gcc make pkgconf which ca-certificates fontconfig libxml2" ;;
+        apt-get) echo "ca-certificates fontconfig libxml2" ;;
+        dnf|yum|microdnf|pacman) echo "ca-certificates fontconfig libxml2 which" ;;
+        zypper) echo "ca-certificates fontconfig libxml2-2 which" ;;
+        apk) echo "ca-certificates fontconfig ttf-dejavu libxml2" ;;
     esac
 }
 
-# curl and the tarball tools are requested by *command*, not by package: the
-# RHEL images ship `curl-minimal`, and asking for `curl` there is a package
-# conflict rather than a no-op. Only name a package when its command is
-# genuinely absent.
+# Only for the source-build stage: R compiles C for xml2.
+build_prereqs() {
+    case "$PM" in
+        apt-get) echo "build-essential pkg-config" ;;
+        dnf|yum|microdnf) echo "gcc gcc-c++ make pkgconf-pkg-config" ;;
+        zypper) echo "gcc gcc-c++ make pkg-config" ;;
+        apk) echo "build-base musl-dev" ;;
+        pacman) echo "gcc make pkgconf" ;;
+    esac
+}
+
+# The tarball tools are requested by *command*, not by package: the RHEL images
+# ship curl-minimal, and asking for `curl` there is a package conflict rather
+# than a no-op. Only name a package when its command is genuinely absent.
 tools() {
-    for pair in "curl curl" "tar tar" "gzip gzip" "xz $(xz_pkg)"; do
+    for pair in "tar tar" "gzip gzip" "xz $(xz_pkg)"; do
         cmd=${pair%% *}
         pkg=${pair#* }
         command -v "$cmd" >/dev/null 2>&1 || printf '%s ' "$pkg"
@@ -128,63 +145,42 @@ sysreqs_autoinstall_supported() {
 # ------------------------------------------------------------- stage: deps ---
 
 if ! skipped prereqs; then
-    group "Install prerequisites ($PM)"
+    group "Install runtime prerequisites ($PM)"
     pm_refresh
     # shellcheck disable=SC2046  # deliberate word splitting: a package list
-    pm_install $(prereqs) $(tools)
+    pm_install $(runtime_prereqs) $(tools)
     endgroup
 fi
 
-# ------------------------------------------------------------- stage: rust ---
+# ------------------------------------------------- stage: pick the artifact ---
 
-if ! skipped rust; then
-    group "Install Rust toolchain"
-    if command -v cargo >/dev/null 2>&1; then
-        note "cargo already present: $(cargo --version)"
-    elif [ "$PM" = apk ]; then
-        # rustup-init from the distro so the toolchain links against musl.
-        apk add --no-cache rustup
-        rustup-init -y --default-toolchain stable --profile minimal --no-modify-path
-    else
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
-    fi
-    endgroup
+# The same rule install.sh applies, so the matrix exercises the binary a user
+# on this distro would actually receive — including the choice itself.
+libc=gnu
+if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+    libc=musl
+elif [ -f /etc/alpine-release ]; then
+    libc=musl
 fi
+arch="$(uname -m)"
+[ "$arch" = arm64 ] && arch=aarch64
+TARGET="${arch}-unknown-linux-${libc}"
+UVR="$DIST/uvr-$TARGET/uvr"
 
-if [ -f "$HOME/.cargo/env" ]; then
-    # shellcheck disable=SC1091
-    . "$HOME/.cargo/env"
-fi
-cargo --version || fail "no cargo on PATH after toolchain install"
+note "install.sh would fetch: uvr-$TARGET.tar.gz"
+[ -x "$UVR" ] || fail "no release build for $TARGET under $DIST"
 
-# Keep each distro's build products apart: the mounted source tree is shared
-# with the host and with every other distro in the matrix, and objects linked
-# against one libc must never be picked up by another.
-CARGO_TARGET_DIR="/tmp/uvr-target"
-export CARGO_TARGET_DIR
-UVR="$CARGO_TARGET_DIR/debug/uvr"
-
-# ------------------------------------------------------ stage: build + test ---
-
-# Unconditional: every stage below runs the binary this produces, so there is
-# nothing left to skip to if it is missing.
-group "cargo build --all"
-cargo build --all
+# `--version` on a bare image is the whole glibc-floor question in one line: a
+# gnu binary linked against a newer glibc than this distro ships dies right
+# here, which is what a user hits seconds after running install.sh.
+group "uvr --version ($TARGET)"
+"$UVR" --version || fail "the $TARGET release binary does not run on this distro"
+"$UVR" --help > /dev/null
 endgroup
 
-if ! skipped test; then
-    # The whole suite, natively. Most of it is distro-independent logic, but it
-    # is a few seconds once the tree is built and it is the only way to catch
-    # the parts that are not: package-manager probing (sysreqs::filter_missing),
-    # shell activation, path and permission handling.
-    #
-    # The *_live.rs tests are #[ignore]d and stay that way here; catalog
-    # conformance is its own job and must not make this one flaky.
-    group "cargo test --all"
-    cargo test --all
-    endgroup
-fi
+group "uvr doctor"
+"$UVR" doctor || true
+endgroup
 
 # --------------------------------------------------------------- stage: R ---
 
@@ -195,27 +191,17 @@ if ! skipped r; then
     done
     "$UVR" r list --all
     endgroup
-
-    # Activation resolves an R interpreter, so these skipped in `cargo test`
-    # above — R did not exist yet. Re-run them now that it does. Shell-specific
-    # cases self-skip when their shell is absent, which is the common case in a
-    # minimal image.
-    group "Activation tests against installed R"
-    rroot="$HOME/.uvr/r-versions/$R_LATEST"
-    PATH="$rroot/bin:$PATH"
-    export PATH
-    R --version
-    cargo test --test cli_tests activate
-    endgroup
 fi
 
 # ---------------------------------------------------- stage: binary package ---
 
 # #175: a binary from the wrong distro's repo installs happily and only fails
 # at library() — so the assertion has to load the package, not just install it.
+# There is still no compiler on this image, so a "binary" install that quietly
+# falls back to a source build fails here instead of passing for the wrong
+# reason.
 if ! skipped binary; then
     group "Binary package install ($SMOKE_PKG)"
-    "$UVR" doctor || true
     work=/tmp/binary-smoke
     rm -rf "$work" && mkdir -p "$work" && cd "$work"
     "$UVR" init --here binary-smoke --r-version "$R_LATEST"
@@ -231,16 +217,22 @@ fi
 # The #209 regression test, at the real end of the chain.
 #
 # The image has libxml2's runtime library but not its headers, so a source
-# build of xml2 cannot succeed unless uvr correctly resolves the distro's
-# devel package and installs it. Nothing here greps a warning string: the
-# source build either compiles or it does not, and it only compiles if every
-# link in the chain — os-release parse, catalog naming, package-manager probe,
-# installer dialect — is right for this distro.
+# build of xml2 cannot succeed unless uvr resolves this distro's devel package
+# and installs it. Nothing here greps a warning string: the build either
+# compiles or it does not, and it only compiles if every link — os-release
+# parse, catalog naming, package-manager probe, installer dialect — is right
+# for this distro.
 #
-# Which is exactly what #209 broke: RHEL asked the catalog under a name it
-# does not publish, got nothing back, installed nothing, and the build failed.
+# Which is exactly what #209 broke: RHEL asked the catalog under a name it does
+# not publish, got nothing back, installed nothing, and the build failed. A
+# pre-fix binary fails this stage with `libxml/tree.h: No such file or
+# directory` having printed no warning at all — which is why the assertion is
+# "the build works" rather than "the warning is absent".
 if ! skipped sysreqs; then
     group "System dependency resolution ($SMOKE_PKG from source)"
+    # shellcheck disable=SC2046  # deliberate word splitting: a package list
+    pm_install $(build_prereqs)
+
     work=/tmp/sysreqs-smoke
     rm -rf "$work" && mkdir -p "$work" && cd "$work"
     "$UVR" init --here sysreqs-smoke --r-version "$R_LATEST"

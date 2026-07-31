@@ -11,9 +11,9 @@ Catch the class of bug #209 belongs to: **uvr identifies the host under a name s
 third-party catalog doesn't use, and nothing notices until a user on that distro files
 an issue.**
 
-Concretely: compile and run uvr's full test suite natively inside every Linux
-distribution uvr claims to support, and assert the three distro-keyed mappings against
-the images themselves rather than against what we assume they report.
+Concretely: run the uvr binary users actually receive inside every Linux distribution
+uvr claims to support, and assert the three distro-keyed mappings against the images
+themselves rather than against what we assume they report.
 
 ## The bug class
 
@@ -134,7 +134,7 @@ ignore-list with a reason. The forward tests find *wrong* mappings; only this on
 *missing* ones — it is what surfaces "the catalog publishes `rockylinux` but nothing
 resolves to it".
 
-### Lane B — the full suite, natively, in every distro
+### Lane B — the shipped binary, in every distro
 
 `ci/distro-suite.sh`, run once per image:
 
@@ -146,30 +146,41 @@ docker run --rm -v "$PWD:/work" -w /work <image> sh ci/distro-suite.sh
 binary needing a glibc the musl and minimal images don't have. Checking out on the host
 and mounting the tree in gives **one shape that works for all 29 images**.
 
-Everything is compiled and executed with the distro's own toolchain against its own
-libc. Cross-compiling or shipping a static binary would test the build host, which is
-the opposite of the point.
+**Nothing is built inside the images.** Users don't `cargo build` uvr — `install.sh`
+drops a release binary on their machine — so the artifact under test is the one that
+ships. Both Linux targets are built once in a `build` job, handed to every image, and
+each container picks between them with the same rule `install.sh` applies:
+
+```sh
+libc=gnu
+if command -v ldd && ldd --version 2>&1 | grep -qi musl; then libc=musl
+elif [ -f /etc/alpine-release ]; then libc=musl; fi
+```
+
+so the *selection* is under test too, not just the binary. Compiling in each container
+would hide exactly the failures that matter: a gnu build whose glibc floor sits above
+what the distro ships, or a musl build chosen on a glibc host. A from-source build
+succeeds in both cases and tells you nothing — it is linked against the libc that is
+present by construction.
 
 Stages, in order:
 
-1. **prereqs** — compiler, TLS roots, fontconfig, libxml2 *runtime*. The one place
-   that knows package-manager dialects (apt/dnf/microdnf/zypper/apk/pacman/yum), so
-   adding a distro means adding a JSON entry, not a line of YAML. Notably absent:
-   libxml2's headers — their absence is what stage 6 tests.
-2. **rust** — rustup, or the distro's own rustup on musl so the toolchain links
-   against musl.
-3. **test** — `cargo build --all` then `cargo test --all`. Most of the suite is
-   distro-independent logic, but it is seconds once built and it is the only way to
-   reach the parts that aren't: package-manager probing (`sysreqs::filter_missing`),
-   shell activation, path and permission handling. `*_live.rs` stays `#[ignore]`d —
-   catalog conformance is its own job and must not make this one flaky.
-4. **r** — install R, then re-run the activation tests with it on PATH. They skip
-   during `cargo test` because no R existed yet; shell-specific cases self-skip when
-   their shell is absent, which is the common case in a minimal image.
-5. **binary** — install and `library()` the smoke package. #175: a binary from the
+1. **prereqs** — TLS roots, fontconfig, libxml2 *runtime*, and the tarball tools. The
+   one place that knows package-manager dialects (apt/dnf/microdnf/zypper/apk/pacman/
+   yum), so adding a distro means adding a JSON entry, not a line of YAML. Notably
+   absent: a compiler and libxml2's headers — the next three stages run on a bare
+   image precisely to prove the shipped binary needs neither.
+2. **version** — `uvr --version` and `--help`. One line, and it is the whole
+   glibc-floor question: a binary linked above this distro's glibc dies right here,
+   which is what a user hits seconds after running `install.sh`.
+3. **r** — install R and list it. Exercises the portable-build download, extract and
+   `R --version` validation on this distro's libc.
+4. **binary** — install and `library()` the smoke package. #175: a binary from the
    wrong distro's repo installs happily and only fails at load, so the assertion has
-   to load it, not just install it.
-6. **sysreqs** — the #209 regression test at the real end of the chain:
+   to load it. With no compiler present, an install that quietly falls back to a
+   source build fails here rather than passing for the wrong reason.
+5. **sysreqs** — the #209 regression test at the real end of the chain. Installs a
+   compiler first, since this is the stage that needs one:
 
    ```sh
    UVR_INSTALL_SYSREQS=1 uvr add xml2 --no-binary
@@ -216,12 +227,13 @@ the 20-job concurrency limit.
 | Lane | Per job | Jobs | Wall clock |
 |---|---|---|---|
 | A | < 1s | 1 (folded into `cargo test`) | none |
-| B, PR subset | ~8 min | 6 | ~8 min |
-| B, nightly | ~8 min | 29 | ~25 min at `max-parallel: 12` |
+| build | ~4 min | 1, cached, shared by all images | — |
+| B, PR subset | ~4 min | 6 | ~8 min including the build |
+| B, nightly | ~4 min | 29 | ~15 min at `max-parallel: 12` |
 
-Roughly 4 runner-hours nightly. No cargo cache is shared between distros on purpose:
-objects linked against one libc must never be picked up by another, so each container
-builds into its own `/tmp` target dir from scratch.
+Roughly 2 runner-hours nightly. Not compiling in the containers is most of why: each
+image does a package-manager install, an R download and one package build, and nothing
+else.
 
 ## Delivery
 
@@ -245,9 +257,12 @@ the suite locally — that `curl` is a package conflict on RHEL images shipping
 
 - **No VM-based testing.** Containers cover every axis here; a VM adds systemd and a
   kernel, neither of which uvr touches.
-- **No prebuilt or cross-compiled test binaries.** Shipping one static binary to 29
-  containers would be far faster and would test the build host's libc instead of the
-  distro's — the exact substitution this whole design exists to prevent.
+- **No from-source build inside the images, and no `cargo test` there either.** Almost
+  all of the Rust suite is distro-independent logic that cannot fail differently on
+  RHEL than on Ubuntu, and running it 29 times would cost more than the rest of the
+  matrix combined while testing a binary no user will ever run. The distro-sensitive
+  behaviour — libc floor, package-manager probing, catalog naming, R extraction — is
+  reachable from the CLI, which is also how users reach it.
 - **No auto-generation of the mapping tables from the catalogs.** Tempting, and wrong:
   the mapping encodes judgement (AlmaLinux takes Rocky's entries; SLES takes openSUSE's
   *binaries* but its own *sysreqs*) that a scraper would flatten. Tests that fail

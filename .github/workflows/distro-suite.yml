@@ -1,7 +1,10 @@
 name: Distro suite
 
-# The full test suite, compiled and run natively inside every Linux
-# distribution uvr supports.
+# Every Linux distribution uvr supports, exercised with the binary that ships.
+#
+# The suite installs nothing from source and builds no code inside the images:
+# users get a release binary from install.sh, so that is what runs here, picked
+# per-image by the same libc rule install.sh applies.
 #
 # Why this exists: uvr maps /etc/os-release onto three third-party
 # vocabularies (portable-R target, P3M binary repo, sysreqs catalog) and the
@@ -74,9 +77,45 @@ jobs:
           echo "count=$(jq 'length' <<<"$sel")" >> "$GITHUB_OUTPUT"
           jq -r '.[].key' <<<"$sel" | tr '\n' ' '
 
+  # The artifact under test is the one that ships. Both Linux targets are built
+  # once here and handed to every image; each container then picks between them
+  # with the same libc rule install.sh uses, so the selection is under test too.
+  build:
+    name: Build release binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: distro-suite-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: distro-suite-cargo-
+      - name: Build
+        run: |
+          set -euxo pipefail
+          for t in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
+            cargo build --release --target "$t" --bin uvr
+            mkdir -p "dist/uvr-$t"
+            cp "target/$t/release/uvr" "dist/uvr-$t/uvr"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uvr-linux-release
+          path: dist/
+          retention-days: 1
+
   suite:
     name: ${{ matrix.entry.key }}
-    needs: select
+    needs: [select, build]
     if: needs.select.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -90,11 +129,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: uvr-linux-release
+          path: dist
+
+      - name: Restore the executable bit
+        run: chmod +x dist/*/uvr
+
       # `docker run` rather than a `container:` job: actions/checkout runs a
       # node binary that needs a glibc the musl and minimal images don't have.
       # Checking out on the host and mounting the tree in gives one shape that
       # works for all 29 images.
-      - name: Full suite in ${{ matrix.entry.image }}
+      - name: Suite in ${{ matrix.entry.image }}
         run: |
           docker run --rm \
             -v "$PWD:/work" -w /work \
