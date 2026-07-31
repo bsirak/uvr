@@ -677,8 +677,23 @@ fn test_activate_emit_outside_project_fails() {
         .stderr(predicate::str::contains("Not inside a uvr project"));
 }
 
+/// True when uvr can resolve an R interpreter. `activate --emit` resolves R
+/// so the emitted script points at a real one, so these tests need one.
+/// CI runs `cargo test` before its R-install step.
+fn have_r() -> bool {
+    std::process::Command::new("R")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn test_activate_emit_sh_is_valid_shell() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
     let dir = init_project("emitproj");
     let out = uvr_cmd()
         .args(["activate", "--emit", "sh"])
@@ -701,6 +716,10 @@ fn test_activate_emit_sh_is_valid_shell() {
 
 #[test]
 fn test_activate_emit_every_shell_succeeds() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
     let dir = init_project("allshells");
     for shell in ["sh", "bash", "zsh", "fish", "powershell"] {
         uvr_cmd()
@@ -710,6 +729,40 @@ fn test_activate_emit_every_shell_succeeds() {
             .success()
             .stdout(predicate::str::contains("R_LIBS_USER"));
     }
+}
+
+/// True when a fish interpreter is on PATH.
+fn have_fish() -> bool {
+    std::process::Command::new("fish")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn test_activate_emit_fish_is_valid_fish() {
+    // fish's emitter is the most structurally different of the three (list
+    // PATH, `set -q`, function-based prompt) and was the only one never
+    // handed to a real interpreter.
+    if !have_fish() || !have_r() {
+        eprintln!("skipping: need fish and R");
+        return;
+    }
+    let dir = init_project("fishproj");
+    let out = uvr_cmd()
+        .args(["activate", "--emit", "fish"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let script = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    let f = dir.path().join("emitted.fish");
+    fs::write(&f, &script).unwrap();
+    Command::new("fish").arg("-n").arg(&f).assert().success();
+
+    assert!(script.contains("set -gx R_LIBS_USER"));
+    assert!(script.contains("function deactivate"));
 }
 
 #[test]
@@ -749,6 +802,10 @@ fn test_activate_powershell_isolation_survives_a_real_shell() {
     // Windows case before a user does.
     if !have_pwsh() {
         eprintln!("skipping: pwsh not installed");
+        return;
+    }
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
         return;
     }
 

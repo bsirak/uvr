@@ -213,8 +213,11 @@ fn emit_posix(project: &str, env: &REnv, prompt: bool) -> String {
         sh_quote(project)
     ));
     if prompt {
+        // Deliberately not exported: PS1 is a shell variable. Exporting it
+        // would push the prompt into every child process, and deactivate
+        // could not put that back.
         out.push_str(&format!(
-            "PS1={}\"${{PS1-}}\"; export PS1\n",
+            "PS1={}\"${{PS1-}}\"\n",
             sh_quote(&format!("({project}) "))
         ));
     }
@@ -223,9 +226,17 @@ fn emit_posix(project: &str, env: &REnv, prompt: bool) -> String {
     // remove itself so the shell is left exactly as it was found.
     out.push_str("deactivate() {\n");
     for name in &saved {
+        // PS1 is restored without `export` for the same reason it is set
+        // without it — see above.
+        let export = if *name == "PS1" {
+            ""
+        } else {
+            " export {name};"
+        };
+        let export = export.replace("{name}", name);
         out.push_str(&format!(
-            "    if [ -n \"${{UVR_OLD_{name}_SET-}}\" ]; then {name}=\"${{UVR_OLD_{name}-}}\"; \
-             export {name}; else unset {name}; fi\n"
+            "    if [ -n \"${{UVR_OLD_{name}_SET-}}\" ]; then {name}=\"${{UVR_OLD_{name}-}}\";\
+             {export} else unset {name}; fi\n"
         ));
     }
     let bookkeeping: Vec<String> = saved
@@ -689,10 +700,7 @@ mod tests {
     #[test]
     fn posix_prompt_prefixes_and_restores_ps1() {
         let out = emit_posix("demo", &env(), true);
-        assert!(
-            out.contains(r#"PS1='(demo) '"${PS1-}"; export PS1"#),
-            "{out}"
-        );
+        assert!(out.contains(r#"PS1='(demo) '"${PS1-}""#), "{out}");
         // Saved before it is modified, and restored on the way out.
         assert!(out.contains(r#"UVR_OLD_PS1="${PS1-}""#));
         assert!(out.contains(r#"if [ -n "${UVR_OLD_PS1_SET-}" ]; then PS1="${UVR_OLD_PS1-}""#));
@@ -700,6 +708,16 @@ mod tests {
             out.contains("unset UVR_OLD_PS1 UVR_OLD_PS1_SET")
                 || out.contains("UVR_OLD_PS1 UVR_OLD_PS1_SET")
         );
+    }
+
+    #[test]
+    fn posix_never_exports_the_prompt() {
+        // PS1 is a shell variable. Exporting it would push the prompt into
+        // every child process, and deactivate could not undo that.
+        let out = emit_posix("demo", &env(), true);
+        assert!(!out.contains("export PS1"), "PS1 is exported:\n{out}");
+        // Other managed vars still are — they are genuine env vars.
+        assert!(out.contains("export R_LIBS_USER"));
     }
 
     #[test]
