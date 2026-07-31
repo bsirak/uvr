@@ -158,9 +158,10 @@ fn unquote(s: &str) -> String {
 }
 
 fn bioc_config_cache_path() -> PathBuf {
-    crate::env_vars::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("bioc-config.yaml")
+    // cache_dir_or_temp, not `.`: a HOME-less sandbox must not have a live-
+    // fetched file land in the project directory (#161 — this site was added
+    // after that sweep and reintroduced the exact pattern it removed).
+    crate::env_vars::cache_dir_or_temp().join("bioc-config.yaml")
 }
 
 /// True when `path` exists and is younger than [`BIOC_CONFIG_TTL`]. An

@@ -69,21 +69,28 @@ impl<R: Read> LinkSizeFix<R> {
         Ok(())
     }
 
-    /// Parse the octal size field. Returns `None` for GNU base-256 encoding
-    /// (top bit set — only produced for >8GB entries, never links) or
-    /// unparseable content; those headers are passed through untouched.
+    /// Parse the size field the same way the `tar` crate does — the shim's
+    /// byte accounting MUST agree with the downstream parser, or the stream
+    /// desyncs and file content gets mis-sliced with no checksum to catch it.
+    ///
+    /// - GNU base-256 (top bit of the first byte set, >8GB entries): decode
+    ///   the big-endian value, mirroring tar-rs's `numeric_extended_from`.
+    /// - Octal: truncate at the first NUL only, then trim — POSIX permits
+    ///   *leading* space padding too, and tar-rs's `octal_from` accepts it;
+    ///   truncating at the first space would misread `"  1234\0"` as 0.
+    ///
+    /// `None` only for fields the tar crate itself would also reject (the
+    /// whole extraction errors, so a wrong skip count is moot).
     fn parse_octal_size(field: &[u8]) -> Option<u64> {
         if field.first().is_some_and(|b| b & 0x80 != 0) {
-            return None;
+            let mut val: u64 = (field[0] & 0x7f) as u64;
+            for &b in &field[1..] {
+                val = val.checked_mul(256)?.checked_add(b as u64)?;
+            }
+            return Some(val);
         }
-        let s: &[u8] = {
-            let end = field
-                .iter()
-                .position(|&b| b == 0 || b == b' ')
-                .unwrap_or(field.len());
-            &field[..end]
-        };
-        let s = std::str::from_utf8(s).ok()?.trim();
+        let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+        let s = std::str::from_utf8(&field[..end]).ok()?.trim();
         if s.is_empty() {
             return Some(0);
         }
@@ -100,7 +107,9 @@ impl<R: Read> LinkSizeFix<R> {
         }
         let size = match Self::parse_octal_size(&self.buf[SIZE_OFFSET..SIZE_OFFSET + SIZE_LEN]) {
             Some(s) => s,
-            None => return 0, // base-256/unparseable: leave alone, assume no skew
+            // Unparseable for the tar crate too — extraction errors on this
+            // header regardless, so the skip count doesn't matter.
+            None => return 0,
         };
         let typeflag = self.buf[TYPEFLAG_OFFSET];
         // '1' = hardlink, '2' = symlink: POSIX mandates no data blocks. R's
@@ -202,6 +211,101 @@ mod tests {
         let pad = (BLOCK - content.len() % BLOCK) % BLOCK;
         out.extend(std::iter::repeat_n(0u8, pad));
         out
+    }
+
+    /// Recompute a raw header's checksum after mutating its fields, using the
+    /// same formula the shim and the tar crate share.
+    fn recompute_cksum(block: &mut [u8; BLOCK]) {
+        let mut sum: u64 = 0;
+        for (i, &b) in block.iter().enumerate() {
+            if (CKSUM_OFFSET..CKSUM_OFFSET + CKSUM_LEN).contains(&i) {
+                sum += b' ' as u64;
+            } else {
+                sum += b as u64;
+            }
+        }
+        let cksum = format!("{sum:06o}\0 ");
+        block[CKSUM_OFFSET..CKSUM_OFFSET + CKSUM_LEN].copy_from_slice(cksum.as_bytes());
+    }
+
+    /// A regular-file entry whose size field is written with an unusual (but
+    /// spec-legal / tar-crate-accepted) encoding, plus its content blocks.
+    fn regular_file_with_raw_size_field(path: &str, content: &[u8], size_field: &[u8]) -> Vec<u8> {
+        assert_eq!(size_field.len(), SIZE_LEN);
+        let mut h = tar::Header::new_gnu();
+        h.set_path(path).unwrap();
+        h.set_size(content.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        let mut block = [0u8; BLOCK];
+        block.copy_from_slice(h.as_bytes());
+        block[SIZE_OFFSET..SIZE_OFFSET + SIZE_LEN].copy_from_slice(size_field);
+        recompute_cksum(&mut block);
+        let mut out = Vec::new();
+        out.extend_from_slice(&block);
+        out.extend_from_slice(content);
+        out.extend(std::iter::repeat_n(
+            0u8,
+            (BLOCK - content.len() % BLOCK) % BLOCK,
+        ));
+        out
+    }
+
+    #[test]
+    fn leading_space_padded_size_fields_stay_aligned() {
+        // POSIX permits LEADING space padding on numeric fields, and the tar
+        // crate accepts it (NUL-truncate + trim). An earlier version of the
+        // shim truncated at the first space and read such sizes as 0 — a
+        // stream desync that mis-slices the following entries' content with
+        // no checksum to catch it. "40" octal = 32 bytes.
+        let content = [b'x'; 32];
+        let mut ar =
+            regular_file_with_raw_size_field("pkg/padded.bin", &content, b"      40\0\0\0\0");
+        ar.extend_from_slice(&regular_file("pkg/after.txt", b"aligned"));
+        ar.extend(std::iter::repeat_n(0u8, BLOCK * 2));
+
+        let mut archive = tar::Archive::new(LinkSizeFix::new(&ar[..]));
+        let mut names = Vec::new();
+        let mut after = String::new();
+        for entry in archive.entries().unwrap() {
+            let mut e = entry.expect("entry parses through the shim");
+            names.push(e.path().unwrap().display().to_string());
+            if names.last().unwrap().ends_with("after.txt") {
+                e.read_to_string(&mut after).unwrap();
+            }
+        }
+        assert_eq!(names, vec!["pkg/padded.bin", "pkg/after.txt"]);
+        assert_eq!(after, "aligned");
+    }
+
+    #[test]
+    fn base256_size_fields_stay_aligned() {
+        // GNU base-256 size encoding (top bit of the first byte set). An
+        // earlier shim version treated it as "no data follows", desyncing on
+        // any archive the tar crate itself parses fine. Encode 600 bytes.
+        let content = [b'y'; 600];
+        let mut size_field = [0u8; SIZE_LEN];
+        size_field[0] = 0x80;
+        size_field[10] = (600u16 >> 8) as u8;
+        size_field[11] = (600u16 & 0xff) as u8;
+        let mut ar = regular_file_with_raw_size_field("pkg/big.bin", &content, &size_field);
+        ar.extend_from_slice(&regular_file("pkg/after.txt", b"aligned"));
+        ar.extend(std::iter::repeat_n(0u8, BLOCK * 2));
+
+        let mut archive = tar::Archive::new(LinkSizeFix::new(&ar[..]));
+        let mut names = Vec::new();
+        let mut big_len = 0usize;
+        for entry in archive.entries().unwrap() {
+            let mut e = entry.expect("entry parses through the shim");
+            names.push(e.path().unwrap().display().to_string());
+            if names.last().unwrap().ends_with("big.bin") {
+                let mut buf = Vec::new();
+                e.read_to_end(&mut buf).unwrap();
+                big_len = buf.len();
+            }
+        }
+        assert_eq!(names, vec!["pkg/big.bin", "pkg/after.txt"]);
+        assert_eq!(big_len, 600);
     }
 
     /// Archive layout mirroring the RcppParallel P3M tarball (#203): a
