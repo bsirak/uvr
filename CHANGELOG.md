@@ -7,6 +7,18 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.4.4 (2026-07-31)
+
+The biggest release yet, driven by a wave of new users: GitLab-hosted
+packages (community PR by @pteridin), correct binaries on Arch/Fedora and
+every other distro Posit doesn't publish for (@gdevenyi, fixing a report
+by @atsyplenkov), a tar-extraction fix that unblocks P3M binaries bundling
+shared libraries (reported with a full root-cause by @cfljam), corporate
+TLS support via the OS trust store (@gladkia's reports), a live
+R↔Bioconductor mapping that ends a recurring staleness bug, and a batch of
+eleven audit fixes. The unreviewed surfaces passed an adversarial review
+before tagging, which itself caught two parser-parity bugs fixed here.
+
 - R version comparison now uses R's semantics (#157): `4.5` == `4.5.0`,
   `-` separates components (`1.2-7` == `1.2.7`), and a non-numeric tail
   sorts as a pre-release. The old comparator sorted shorter versions first
