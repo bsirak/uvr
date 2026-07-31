@@ -244,9 +244,28 @@ else.
    and is independently the thing to paste into a bug report.
 2. **`ci/distro-suite.sh` + `distro-suite.yml`, PR lane only** (6 images).
 3. **Nightly lane + drift-to-issue** across all 29.
-4. **`sysreqs_live.rs`**, folded into `test-p3m-repos` renamed `test-catalogs`: probe
-   the live API for every entry marked `api: true`. Catches Posit adding or retiring
-   releases, which the offline tests cannot see.
+4. **`catalog_live.rs`**, folded into `test-p3m-repos` renamed `test-catalogs`. Posit
+   publishes the whole supported-distro list as one documented, versioned endpoint —
+   `GET /__api__/status`, described in the OpenAPI spec at `/__api__/swagger/doc.json`
+   (spec version tracks the server build; `2026.06.0` at the time of writing). Each
+   entry carries `distribution`, `release`, `binaryURL`, `sysReqs`, `binaries`,
+   `hidden` and `arch`:
+
+   ```
+   rhel8    redhat      8     centos8         sysReqs=true  binaries=true   x86_64
+   rhel9    rockylinux  9     rhel9           sysReqs=true  binaries=true   x86_64,arm64
+   sles156  sle         15.6  opensuse156     sysReqs=true  binaries=true   x86_64
+   buster   debian      10    buster          sysReqs=true  binaries=false  x86_64
+   ```
+
+   One request replaces per-pair probing and answers questions probing cannot: which
+   repos are `hidden` (retired from the dropdown but still served — exactly what
+   `p3m_repos_live.rs` keeps mappings for), and which have arm64 builds.
+
+   Cross-checked against the 29 hand-set `sysreqs.api` flags in the matrix: **29/29
+   agree**, including the non-obvious ones (`rockylinux` 9 and 10 but not 8; no
+   `fedora` or `alpine` at any release). The flags can now be derived from the
+   endpoint rather than maintained.
 
 Bugs this design has already surfaced, before any of it runs in CI: the Oracle Linux
 gap, the zypper/pacman installer gap, the `rockylinux` 8 API gap, and — from running
@@ -263,9 +282,30 @@ the suite locally — that `curl` is a package conflict on RHEL images shipping
   matrix combined while testing a binary no user will ever run. The distro-sensitive
   behaviour — libc floor, package-manager probing, catalog naming, R extraction — is
   reachable from the CLI, which is also how users reach it.
-- **No auto-generation of the mapping tables from the catalogs.** Tempting, and wrong:
-  the mapping encodes judgement (AlmaLinux takes Rocky's entries; SLES takes openSUSE's
-  *binaries* but its own *sysreqs*) that a scraper would flatten. Tests that fail
-  loudly are the right mechanism; codegen would just move the guess.
-- **No arm64 distro matrix.** All three axes are arch-independent below the R-build
-  layer, which `ubuntu-24.04-arm` already covers.
+- **No auto-generation of the forward mapping from the catalogs.** The os-release →
+  catalog direction encodes judgement a scraper would flatten: AlmaLinux takes Rocky's
+  entries, and SLES takes openSUSE's *binaries* but its own *sysreqs* vocabulary —
+  which `/__api__/status` confirms, listing `sles156` as distribution `sle` release
+  `15.6` with `binaryURL: opensuse156`. That stays hand-written and loudly tested.
+
+  The *reverse* direction is a different matter: "what does Posit support that uvr
+  doesn't map?" is answered exactly by `/__api__/status`, so Lane A's coverage test
+  should read the endpoint rather than an ignore-list maintained by hand.
+- **No arm64 distro matrix** — with one caveat this design now knows about. The three
+  identification axes are arch-independent, which `ubuntu-24.04-arm` already covers.
+  But `/__api__/status` shows only `rhel9`, `rhel10`, `noble`, `resolute` and
+  `manylinux_2_28` carry arm64 builds, and P3M routes by the R User-Agent: an arm64
+  host asking `jammy` is served **source**, while `manylinux_2_28` would have served
+  it an arm64 **binary**.
+
+  ```
+  jammy          aarch64  source  (no arm64 build)
+  manylinux_2_28 aarch64  BINARY  bin/4.5-manylinux_2_28-arm64
+  ```
+
+  uvr's slug → codename map has no arch dimension, so on arm64 Ubuntu 22.04, Debian
+  12, RHEL 8 or openSUSE it prefers a distro repo with no arm64 build and compiles
+  everything, when the portable repo would have handed it binaries. Not wrong — P3M
+  degrades to source rather than serving the wrong architecture, so nothing breaks the
+  way #175 did — but slow, and invisible. Worth its own issue; an arm64 lane in this
+  matrix is what would keep it honest.
