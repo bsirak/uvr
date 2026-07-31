@@ -119,10 +119,6 @@ jobs:
     if: needs.select.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Entries carrying `known_failure` reproduce an open issue. They still run
-    # and still show what they found — they just don't block, until the issue
-    # they name is fixed and the field comes off.
-    continue-on-error: ${{ matrix.entry.known_failure != '' }}
     strategy:
       # Every distro is an independent question; one answer must not suppress
       # the other 28.

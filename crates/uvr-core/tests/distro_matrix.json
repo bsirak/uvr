@@ -519,13 +519,13 @@
         "api": false,
         "local": true
       },
-      "known_failure": "#207: CRAN PACKAGES carries no SystemRequirements, so the local-rules fallback resolves nothing — and the local rules are the only sysreqs source on Alpine. Reproduced by the sysreqs stage: xml2 fails to build with libxml2-dev never installed and no warning printed."
+      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Fails today — libxml2-dev is never installed and no warning is printed, which is open issue #207."
     },
     {
       "key": "alpine-321",
       "image": "docker.io/library/alpine:3.21",
       "lane": "pr",
-      "note": "musl: the R build, the libc probe and the local-rules sysreqs path (#30) all differ here.",
+      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Fails today — libxml2-dev is never installed and no warning is printed, which is open issue #207.",
       "os_release": {
         "id": "alpine",
         "version_id": "3.21.7"
@@ -539,8 +539,7 @@
         "release": "3.21.7",
         "api": false,
         "local": true
-      },
-      "known_failure": "#207: CRAN PACKAGES carries no SystemRequirements, so the local-rules fallback resolves nothing — and the local rules are the only sysreqs source on Alpine. Reproduced by the sysreqs stage: xml2 fails to build with libxml2-dev never installed and no warning printed."
+      }
     },
     {
       "key": "alpine-322",
@@ -560,7 +559,7 @@
         "api": false,
         "local": true
       },
-      "known_failure": "#207: CRAN PACKAGES carries no SystemRequirements, so the local-rules fallback resolves nothing — and the local rules are the only sysreqs source on Alpine. Reproduced by the sysreqs stage: xml2 fails to build with libxml2-dev never installed and no warning printed."
+      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Fails today — libxml2-dev is never installed and no warning is printed, which is open issue #207."
     },
     {
       "key": "amazonlinux-2023",
