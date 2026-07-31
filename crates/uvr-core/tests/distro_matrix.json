@@ -1,0 +1,583 @@
+{
+  "_comment": [
+    "Every Linux distribution uvr claims to work on, the image it is exercised in,",
+    "and what each of uvr's three distro-keyed axes must resolve to there.",
+    "",
+    "os_release is CAPTURED, never hand-written: run ci/capture-os-release.sh.",
+    "#209 was a hand-reasoned assumption that RHEL reports VERSION_ID=8, when it",
+    "reports 8.10 — a fixture invented at a desk would have made every offline",
+    "test pass while production stayed broken.",
+    "",
+    "sysreqs.api and sysreqs.local are separate booleans because the two sources",
+    "genuinely disagree: Posit's API serves rockylinux 9 but not 8, and serves no",
+    "fedora or alpine at all, while the vendored rules cover all of them.",
+    "",
+    "\"*\" means not asserted — rolling releases whose VERSION_ID changes on every",
+    "image rebuild.",
+    "",
+    "Verified 2026-07-31 against the live API and the vendored rules."
+  ],
+  "distros": [
+    {
+      "key": "ubuntu-2004",
+      "image": "docker.io/library/ubuntu:20.04",
+      "lane": "nightly",
+      "os_release": {
+        "id": "ubuntu",
+        "version_id": "20.04"
+      },
+      "p3m": {
+        "slug": "ubuntu-2004",
+        "codename": "focal"
+      },
+      "sysreqs": {
+        "distribution": "ubuntu",
+        "release": "20.04",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "ubuntu-2204",
+      "image": "docker.io/library/ubuntu:22.04",
+      "lane": "pr",
+      "os_release": {
+        "id": "ubuntu",
+        "version_id": "22.04"
+      },
+      "p3m": {
+        "slug": "ubuntu-2204",
+        "codename": "jammy"
+      },
+      "sysreqs": {
+        "distribution": "ubuntu",
+        "release": "22.04",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "ubuntu-2404",
+      "image": "docker.io/library/ubuntu:24.04",
+      "lane": "nightly",
+      "os_release": {
+        "id": "ubuntu",
+        "version_id": "24.04"
+      },
+      "p3m": {
+        "slug": "ubuntu-2404",
+        "codename": "noble"
+      },
+      "sysreqs": {
+        "distribution": "ubuntu",
+        "release": "24.04",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "debian-11",
+      "image": "docker.io/library/debian:11",
+      "lane": "nightly",
+      "os_release": {
+        "id": "debian",
+        "version_id": "11"
+      },
+      "p3m": {
+        "slug": "debian-11",
+        "codename": "bullseye"
+      },
+      "sysreqs": {
+        "distribution": "debian",
+        "release": "11",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "debian-12",
+      "image": "docker.io/library/debian:12",
+      "lane": "nightly",
+      "os_release": {
+        "id": "debian",
+        "version_id": "12"
+      },
+      "p3m": {
+        "slug": "debian-12",
+        "codename": "bookworm"
+      },
+      "sysreqs": {
+        "distribution": "debian",
+        "release": "12",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "debian-13",
+      "image": "docker.io/library/debian:13",
+      "lane": "nightly",
+      "os_release": {
+        "id": "debian",
+        "version_id": "13"
+      },
+      "p3m": {
+        "slug": "debian-13",
+        "codename": "trixie"
+      },
+      "sysreqs": {
+        "distribution": "debian",
+        "release": "13",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "rhel-8",
+      "image": "registry.access.redhat.com/ubi8:latest",
+      "lane": "pr",
+      "note": "The #209 image. UBI is the only RHEL testable without a subscription; it reports the same ID/VERSION_ID as subscribed RHEL, which is the axis under test.",
+      "os_release": {
+        "id": "rhel",
+        "version_id": "8.10"
+      },
+      "p3m": {
+        "slug": "rhel-8",
+        "codename": "centos8"
+      },
+      "sysreqs": {
+        "distribution": "redhat",
+        "release": "8",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "rhel-9",
+      "image": "registry.access.redhat.com/ubi9:latest",
+      "lane": "nightly",
+      "os_release": {
+        "id": "rhel",
+        "version_id": "9.8"
+      },
+      "p3m": {
+        "slug": "rhel-9",
+        "codename": "rhel9"
+      },
+      "sysreqs": {
+        "distribution": "redhat",
+        "release": "9",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "rhel-10",
+      "image": "registry.access.redhat.com/ubi10:latest",
+      "lane": "nightly",
+      "os_release": {
+        "id": "rhel",
+        "version_id": "10.2"
+      },
+      "p3m": {
+        "slug": "rhel-10",
+        "codename": "rhel10"
+      },
+      "sysreqs": {
+        "distribution": "redhat",
+        "release": "10",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "rocky-8",
+      "image": "docker.io/rockylinux/rockylinux:8",
+      "lane": "nightly",
+      "note": "api:false is real — Posit serves rockylinux 9 and 10 but not 8. Rocky 8 rides the local rules and reports a degraded check.",
+      "os_release": {
+        "id": "rocky",
+        "version_id": "8.10"
+      },
+      "p3m": {
+        "slug": "rhel-8",
+        "codename": "centos8"
+      },
+      "sysreqs": {
+        "distribution": "rockylinux",
+        "release": "8",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "rocky-9",
+      "image": "docker.io/rockylinux/rockylinux:9",
+      "lane": "pr",
+      "os_release": {
+        "id": "rocky",
+        "version_id": "9.8"
+      },
+      "p3m": {
+        "slug": "rhel-9",
+        "codename": "rhel9"
+      },
+      "sysreqs": {
+        "distribution": "rockylinux",
+        "release": "9",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "rocky-10",
+      "image": "docker.io/rockylinux/rockylinux:10",
+      "lane": "nightly",
+      "os_release": {
+        "id": "rocky",
+        "version_id": "10.2"
+      },
+      "p3m": {
+        "slug": "rhel-10",
+        "codename": "rhel10"
+      },
+      "sysreqs": {
+        "distribution": "rockylinux",
+        "release": "10",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "almalinux-8",
+      "image": "docker.io/library/almalinux:8",
+      "lane": "nightly",
+      "os_release": {
+        "id": "almalinux",
+        "version_id": "8.10"
+      },
+      "p3m": {
+        "slug": "rhel-8",
+        "codename": "centos8"
+      },
+      "sysreqs": {
+        "distribution": "rockylinux",
+        "release": "8",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "almalinux-9",
+      "image": "docker.io/library/almalinux:9",
+      "lane": "nightly",
+      "os_release": {
+        "id": "almalinux",
+        "version_id": "9.8"
+      },
+      "p3m": {
+        "slug": "rhel-9",
+        "codename": "rhel9"
+      },
+      "sysreqs": {
+        "distribution": "rockylinux",
+        "release": "9",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "almalinux-10",
+      "image": "docker.io/library/almalinux:10",
+      "lane": "nightly",
+      "os_release": {
+        "id": "almalinux",
+        "version_id": "10.2"
+      },
+      "p3m": {
+        "slug": "rhel-10",
+        "codename": "rhel10"
+      },
+      "sysreqs": {
+        "distribution": "rockylinux",
+        "release": "10",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "centos-stream9",
+      "image": "quay.io/centos/centos:stream9",
+      "lane": "nightly",
+      "note": "The API stops at centos 8, but the vendored rules carry version-less centos constraints, so Stream resolves locally with a degraded-check warning.",
+      "os_release": {
+        "id": "centos",
+        "version_id": "9"
+      },
+      "p3m": {
+        "slug": "centos-9",
+        "codename": "rhel9"
+      },
+      "sysreqs": {
+        "distribution": "centos",
+        "release": "9",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "centos-stream10",
+      "image": "quay.io/centos/centos:stream10",
+      "lane": "nightly",
+      "os_release": {
+        "id": "centos",
+        "version_id": "10"
+      },
+      "p3m": {
+        "slug": "centos-10",
+        "codename": "rhel10"
+      },
+      "sysreqs": {
+        "distribution": "centos",
+        "release": "10",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "oracle-8",
+      "image": "docker.io/library/oraclelinux:8",
+      "lane": "nightly",
+      "gap": "ID=ol maps nowhere on either axis: no P3M binaries and no sysreqs from either source. Same shape as #209, still open.",
+      "os_release": {
+        "id": "ol",
+        "version_id": "8.10"
+      },
+      "p3m": {
+        "slug": "ol-8.10",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "ol",
+        "release": "8.10",
+        "api": false,
+        "local": false
+      }
+    },
+    {
+      "key": "oracle-9",
+      "image": "docker.io/library/oraclelinux:9",
+      "lane": "nightly",
+      "gap": "See oracle-8.",
+      "os_release": {
+        "id": "ol",
+        "version_id": "9.8"
+      },
+      "p3m": {
+        "slug": "ol-9.8",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "ol",
+        "release": "9.8",
+        "api": false,
+        "local": false
+      }
+    },
+    {
+      "key": "opensuse-155",
+      "image": "docker.io/opensuse/leap:15.5",
+      "lane": "nightly",
+      "os_release": {
+        "id": "opensuse-leap",
+        "version_id": "15.5"
+      },
+      "p3m": {
+        "slug": "opensuse-155",
+        "codename": "opensuse155"
+      },
+      "sysreqs": {
+        "distribution": "opensuse",
+        "release": "15.5",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "opensuse-156",
+      "image": "docker.io/opensuse/leap:15.6",
+      "lane": "pr",
+      "os_release": {
+        "id": "opensuse-leap",
+        "version_id": "15.6"
+      },
+      "p3m": {
+        "slug": "opensuse-156",
+        "codename": "opensuse156"
+      },
+      "sysreqs": {
+        "distribution": "opensuse",
+        "release": "15.6",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "sles-156",
+      "image": "registry.suse.com/bci/bci-base:15.6",
+      "lane": "nightly",
+      "note": "SLES takes openSUSE's binaries but its own sysreqs vocabulary (sle). The two axes diverging here is deliberate, and is why they are asserted separately.",
+      "os_release": {
+        "id": "sles",
+        "version_id": "15.6"
+      },
+      "p3m": {
+        "slug": "opensuse-156",
+        "codename": "opensuse156"
+      },
+      "sysreqs": {
+        "distribution": "sle",
+        "release": "15.6",
+        "api": true,
+        "local": true
+      }
+    },
+    {
+      "key": "fedora-41",
+      "image": "docker.io/library/fedora:41",
+      "lane": "nightly",
+      "note": "Posit serves no fedora sysreqs at all; the vendored rules do. Binaries degrade to manylinux_2_28 by design (#175).",
+      "os_release": {
+        "id": "fedora",
+        "version_id": "41"
+      },
+      "p3m": {
+        "slug": "fedora-41",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "fedora",
+        "release": "41",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "fedora-42",
+      "image": "docker.io/library/fedora:42",
+      "lane": "nightly",
+      "os_release": {
+        "id": "fedora",
+        "version_id": "42"
+      },
+      "p3m": {
+        "slug": "fedora-42",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "fedora",
+        "release": "42",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "arch",
+      "image": "docker.io/library/archlinux:latest",
+      "lane": "pr",
+      "note": "Unmapped by design (#175): must degrade to manylinux_2_28, never claim to be Ubuntu. The image sets VERSION_ID to a rolling snapshot (a bare-metal Arch install sets none), so neither it nor the slug is asserted.",
+      "os_release": {
+        "id": "arch",
+        "version_id": "*"
+      },
+      "p3m": {
+        "slug": "*",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "arch",
+        "release": "*",
+        "api": false,
+        "local": false
+      }
+    },
+    {
+      "key": "alpine-320",
+      "image": "docker.io/library/alpine:3.20",
+      "lane": "nightly",
+      "os_release": {
+        "id": "alpine",
+        "version_id": "3.20.10"
+      },
+      "p3m": {
+        "slug": "alpine-3.20",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "alpine",
+        "release": "3.20.10",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "alpine-321",
+      "image": "docker.io/library/alpine:3.21",
+      "lane": "pr",
+      "note": "musl: the R build, the libc probe and the local-rules sysreqs path (#30) all differ here.",
+      "os_release": {
+        "id": "alpine",
+        "version_id": "3.21.7"
+      },
+      "p3m": {
+        "slug": "alpine-3.21",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "alpine",
+        "release": "3.21.7",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "alpine-322",
+      "image": "docker.io/library/alpine:3.22",
+      "lane": "nightly",
+      "os_release": {
+        "id": "alpine",
+        "version_id": "3.22.5"
+      },
+      "p3m": {
+        "slug": "alpine-3.22",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "alpine",
+        "release": "3.22.5",
+        "api": false,
+        "local": true
+      }
+    },
+    {
+      "key": "amazonlinux-2023",
+      "image": "docker.io/library/amazonlinux:2023",
+      "lane": "nightly",
+      "gap": "ID=amzn maps nowhere on either axis. Unlike Oracle it is not a RHEL rebuild uvr could alias onto an existing entry, so this one is a decision, not an oversight.",
+      "os_release": {
+        "id": "amzn",
+        "version_id": "2023"
+      },
+      "p3m": {
+        "slug": "amzn-2023",
+        "codename": null
+      },
+      "sysreqs": {
+        "distribution": "amzn",
+        "release": "2023",
+        "api": false,
+        "local": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,161 @@
+name: Distro suite
+
+# The full test suite, compiled and run natively inside every Linux
+# distribution uvr supports.
+#
+# Why this exists: uvr maps /etc/os-release onto three third-party
+# vocabularies (portable-R target, P3M binary repo, sysreqs catalog) and the
+# names differ per axis. #175 and #209 were both "we asked under a name that
+# side doesn't use", and neither was reachable from a test running on
+# ubuntu-latest. The only way to know what a distro reports is to ask it.
+#
+# The matrix is generated from crates/uvr-core/tests/distro_matrix.json —
+# adding a distro means adding an entry there, not editing this file.
+
+on:
+  schedule:
+    # Nightly, after the catalogs' business hours. The full matrix is too slow
+    # to gate every PR and its failures are often upstream drift rather than
+    # anything a PR did.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      keys:
+        description: 'Space-separated distro keys, or "all" / "pr"'
+        default: "all"
+        type: string
+  pull_request:
+    # On PRs, only when something that could change distro identification moves.
+    paths:
+      - "crates/uvr-core/src/sysreqs.rs"
+      - "crates/uvr-core/src/sysreqs_rules.rs"
+      - "crates/uvr-core/src/os_release.rs"
+      - "crates/uvr-core/src/registry/p3m.rs"
+      - "crates/uvr-core/src/r_version/downloader.rs"
+      - "crates/uvr-core/vendor/r-system-requirements/**"
+      - "crates/uvr-core/tests/distro_matrix.json"
+      - "ci/distro-suite.sh"
+      - ".github/workflows/distro-suite.yml"
+
+concurrency:
+  group: distro-suite-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # One R version here, not the two the main CI matrix uses: this job's subject
+  # is the distro, and the R-version axis is already covered on ubuntu/macOS/
+  # Windows by ci.yml.
+  R_VERSIONS: "4.5.1"
+  SMOKE_PKG: xml2
+
+jobs:
+  # Which images to run: the `pr` subset on pull requests (one per package
+  # manager family plus musl), everything on a schedule, and whatever was asked
+  # for on a manual dispatch.
+  select:
+    name: Select distros
+    runs-on: ubuntu-latest
+    outputs:
+      entries: ${{ steps.pick.outputs.entries }}
+      count: ${{ steps.pick.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        run: |
+          set -euo pipefail
+          matrix=crates/uvr-core/tests/distro_matrix.json
+          want='${{ github.event_name == 'pull_request' && 'pr' || inputs.keys || 'all' }}'
+          case "$want" in
+            all) sel="$(jq -c '[.distros[]]' "$matrix")" ;;
+            pr)  sel="$(jq -c '[.distros[] | select(.lane == "pr")]' "$matrix")" ;;
+            *)   sel="$(jq -c --arg k "$want" '[.distros[] | select(.key as $x | ($k | split(" ")) | index($x))]' "$matrix")" ;;
+          esac
+          echo "entries=$sel" >> "$GITHUB_OUTPUT"
+          echo "count=$(jq 'length' <<<"$sel")" >> "$GITHUB_OUTPUT"
+          jq -r '.[].key' <<<"$sel" | tr '\n' ' '
+
+  suite:
+    name: ${{ matrix.entry.key }}
+    needs: select
+    if: needs.select.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # Every distro is an independent question; one answer must not suppress
+      # the other 28.
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        entry: ${{ fromJSON(needs.select.outputs.entries) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `docker run` rather than a `container:` job: actions/checkout runs a
+      # node binary that needs a glibc the musl and minimal images don't have.
+      # Checking out on the host and mounting the tree in gives one shape that
+      # works for all 29 images.
+      - name: Full suite in ${{ matrix.entry.image }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -e "R_VERSIONS=${R_VERSIONS}" \
+            -e "SMOKE_PKG=${SMOKE_PKG}" \
+            "${{ matrix.entry.image }}" \
+            sh ci/distro-suite.sh
+
+      # The identity the suite ran under must be the identity the matrix
+      # claims. Cheap, and it is the assertion that keeps the offline
+      # conformance tests honest — a fixture nobody re-checks is how #209
+      # survived.
+      - name: Identity matches the matrix entry
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint "" "${{ matrix.entry.image }}" \
+            sh -c 'grep -E "^(ID|VERSION_ID)=" /etc/os-release' > got.env
+          got_id=$(sed -n 's/^ID=//p' got.env | tail -1 | tr -d '"')
+          got_ver=$(sed -n 's/^VERSION_ID=//p' got.env | tail -1 | tr -d '"')
+          want_id='${{ matrix.entry.os_release.id }}'
+          want_ver='${{ matrix.entry.os_release.version_id }}'
+          [ "$got_id" = "$want_id" ] || {
+            echo "::error::${{ matrix.entry.key }}: image reports ID=$got_id, matrix says $want_id"
+            exit 1
+          }
+          # "*" = rolling release, version deliberately not asserted.
+          if [ "$want_ver" != "*" ] && [ "$got_ver" != "$want_ver" ]; then
+            echo "::error::${{ matrix.entry.key }}: image reports VERSION_ID=$got_ver, matrix says $want_ver — recapture with ci/capture-os-release.sh"
+            exit 1
+          fi
+
+  # Upstream images drift on their own schedule — rockylinux:9 was 9.3 and is
+  # now 9.8. That is a maintenance ticket, not a broken build, so the nightly
+  # reports it instead of turning the tree red.
+  report-drift:
+    name: Report matrix drift
+    needs: [select, suite]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open or update the drift issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Distro suite failing on the nightly matrix"
+          body="The nightly distro suite failed: $RUN_URL
+
+          If the failure is an identity mismatch, an upstream image moved and the
+          matrix needs recapturing:
+
+              ci/capture-os-release.sh <key>
+
+          If it is a suite failure, that distro is genuinely broken for users."
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
