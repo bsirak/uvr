@@ -85,6 +85,37 @@ pub(crate) fn normalize_distro(id: &str, version_id: &str) -> (String, String) {
     (distribution.to_string(), release.to_string())
 }
 
+/// Ask a Posit catalog under a name it actually publishes.
+///
+/// Both of Posit's catalogs — the sysreqs API and the platform list at
+/// `/__api__/status` that P3M binary selection reads — are keyed by the same
+/// `(distribution, release)` vocabulary, and both have the same holes in it,
+/// so both need this. The two sysreqs sources do not cover the same ground. Verified against
+/// `/__api__/status`, which lists every platform Posit serves: the API has
+/// `rockylinux` 9 and 10 but no 8, and `centos` 7 and 8 but no Stream 9 or
+/// 10. The vendored rules cover all four, so those hosts were already getting
+/// correct answers — they were just getting them from the fallback, with a
+/// "check degraded" warning, for distros Posit knows perfectly well under
+/// their RHEL name.
+///
+/// Applied only when querying a catalog. The vendored local rules
+/// deliberately keep the unaliased pair, because the two are *not*
+/// interchangeable there:
+/// `rockylinux` 8 resolves `leptonica-devel` where `redhat` 8 resolves
+/// nothing, and `centos` 8 says `libarchive-devel` where `redhat` 8 says
+/// `libarchive`. Aliasing the local lookup too would trade a spurious warning
+/// for wrong package names.
+pub(crate) fn catalog_alias<'a>(distribution: &'a str, release: &'a str) -> (&'a str, &'a str) {
+    match (distribution, release) {
+        // Rocky/Alma 8. Posit publishes rockylinux from 9 on.
+        ("rockylinux", "8") => ("redhat", "8"),
+        // CentOS Stream. Posit's `centos` stops at 8; Stream tracks the
+        // RHEL major of the same number.
+        ("centos", r) if r.parse::<u32>().is_ok_and(|n| n >= 9) => ("redhat", r),
+        _ => (distribution, release),
+    }
+}
+
 /// Response from the Posit Package Manager sysreqs API.
 #[derive(Debug, Deserialize)]
 struct PpmSysreqsResponse {
@@ -144,6 +175,7 @@ pub async fn resolve_system_deps(
     distro: &str,
 ) -> Result<SysReqLookup> {
     let (distribution, release) = distro.split_once('-').unwrap_or((distro, ""));
+    let (distribution, release) = catalog_alias(distribution, release);
 
     let url = "https://packagemanager.posit.co/__api__/repos/1/sysreqs";
 
@@ -486,6 +518,76 @@ mod tests {
         assert!(
             gdal.iter().any(|p| p == "gdal-devel"),
             "expected gdal-devel for rhel-8.10, got {gdal:?}"
+        );
+    }
+
+    #[test]
+    fn catalogs_are_asked_under_a_name_they_publish() {
+        // Posit serves rockylinux from 9 on, and centos only through 8
+        // (verified against /__api__/status). Asking under the RHEL name is
+        // what turns a degraded-check warning back into a real answer.
+        assert_eq!(catalog_alias("rockylinux", "8"), ("redhat", "8"));
+        assert_eq!(catalog_alias("centos", "9"), ("redhat", "9"));
+        assert_eq!(catalog_alias("centos", "10"), ("redhat", "10"));
+
+        // Everything Posit does publish is left alone.
+        assert_eq!(catalog_alias("rockylinux", "9"), ("rockylinux", "9"));
+        assert_eq!(catalog_alias("rockylinux", "10"), ("rockylinux", "10"));
+        assert_eq!(catalog_alias("centos", "7"), ("centos", "7"));
+        assert_eq!(catalog_alias("centos", "8"), ("centos", "8"));
+        assert_eq!(catalog_alias("redhat", "8"), ("redhat", "8"));
+        assert_eq!(catalog_alias("ubuntu", "22.04"), ("ubuntu", "22.04"));
+        // Not a release number: must not be mistaken for a Stream major.
+        assert_eq!(catalog_alias("centos", "stream"), ("centos", "stream"));
+    }
+
+    #[test]
+    fn the_local_rules_are_not_aliased() {
+        // The alias exists for the API only. These pairs resolve *differently*
+        // in the vendored rules, so aliasing the local lookup as well would
+        // trade a spurious warning for wrong package names.
+        assert!(
+            sysreqs_rules::resolve_local("leptonica", "rockylinux", "8")
+                .iter()
+                .any(|p| p == "leptonica-devel"),
+            "rockylinux 8 carries leptonica-devel"
+        );
+        assert!(
+            sysreqs_rules::resolve_local("leptonica", "redhat", "8").is_empty(),
+            "redhat 8 does not — aliasing the local lookup would lose it"
+        );
+        // Both halves of the libarchive divergence, so the test actually
+        // guards the claim: aliasing the local lookup would swap a headers
+        // package for a runtime one, and a source build would fail at
+        // configure with nothing pointing at the cause.
+        assert!(
+            sysreqs_rules::resolve_local("libarchive", "centos", "8")
+                .iter()
+                .any(|p| p == "libarchive-devel"),
+            "centos 8 wants the -devel package"
+        );
+        assert_eq!(
+            sysreqs_rules::resolve_local("libarchive", "redhat", "8"),
+            vec!["libarchive".to_string()],
+            "redhat 8 names the runtime package, not the headers"
+        );
+    }
+
+    #[test]
+    fn oracle_linux_also_gets_rhel_binaries() {
+        // The sysreqs half of this alias landed with #209; the binary half did
+        // not, so OL hosts resolved their system deps correctly and then
+        // compiled every package because `ol-8.10` maps to no PPM codename.
+        // Both axes have to agree or the alias is only half applied.
+        assert_eq!(
+            crate::r_version::downloader::detect_posit_distro_slug_from_os_release(Some(
+                "ID=ol\nVERSION_ID=8.10\n"
+            )),
+            "rhel-8"
+        );
+        assert_eq!(
+            crate::registry::p3m::ppm_linux_codename("rhel-8"),
+            Some("centos8")
         );
     }
 
