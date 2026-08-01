@@ -37,7 +37,7 @@ const BIOC_CONFIG_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 fn bioc_release_for_r(r_major: u64, r_minor: u64) -> &'static str {
     match (r_major, r_minor) {
         (4, 6) => "3.23",
-        (4, 5) => "3.21",
+        (4, 5) => "3.22",
         (4, 4) => "3.20",
         (4, 3) => "3.18",
         (4, 2) => "3.16",
@@ -596,8 +596,8 @@ release_dates:
     #[test]
     fn config_yaml_picks_latest_released_bioc_per_r() {
         // #120: two Bioc releases share each R, and the newer one is the
-        // answer. The vendored table says R 4.5 → 3.21; the live config says
-        // 3.22, and that staleness is exactly what this fixes.
+        // answer. The live config confirms 3.22 for R 4.5 — the vendored table
+        // now agrees, so both paths return the same release.
         let cfg = parse_bioc_config(CONFIG_YAML_FIXTURE);
         assert_eq!(cfg.release_for_r(4, 5).as_deref(), Some("3.22"));
         assert_eq!(cfg.release_for_r(4, 4).as_deref(), Some("3.20"));
@@ -635,10 +635,10 @@ release_dates:
     fn unusable_config_falls_back_to_the_table() {
         // A missing, truncated, or restructured config.yaml must not break
         // resolution — the vendored table is the safety net.
-        assert_eq!(resolve_release(None, "4.5.1"), "3.21");
+        assert_eq!(resolve_release(None, "4.5.1"), "3.22");
         let empty = parse_bioc_config("output_dir: output\n");
         assert!(empty.pairs.is_empty());
-        assert_eq!(resolve_release(Some(&empty), "4.5.1"), "3.21");
+        assert_eq!(resolve_release(Some(&empty), "4.5.1"), "3.22");
     }
 
     #[test]
@@ -651,7 +651,7 @@ release_dates:
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("UVR_CACHE_DIR", tmp.path());
 
-        assert_eq!(default_release_for_r("4.5.1"), "3.21", "no cache → table");
+        assert_eq!(default_release_for_r("4.5.1"), "3.22", "no cache → table");
 
         std::fs::write(tmp.path().join("bioc-config.yaml"), CONFIG_YAML_FIXTURE).unwrap();
         assert_eq!(default_release_for_r("4.5.1"), "3.22", "cache → live map");
@@ -665,7 +665,7 @@ release_dates:
 
     #[test]
     fn bioc_release_mapping() {
-        assert_eq!(bioc_release_for_r(4, 5), "3.21");
+        assert_eq!(bioc_release_for_r(4, 5), "3.22");
         assert_eq!(bioc_release_for_r(4, 4), "3.20");
         assert_eq!(bioc_release_for_r(4, 3), "3.18");
         assert_eq!(bioc_release_for_r(4, 2), "3.16");
@@ -766,11 +766,11 @@ release_dates:
     #[test]
     fn offline_resolution_maps_r_to_bioc() {
         // The no-config path (offline, empty cache). R 4.6 must map to its own
-        // Bioc release (3.23), not the 4.5 fallback — pulling 3.21 here ships
+        // Bioc release (3.23), not the 4.5 fallback — pulling 3.22 here ships
         // R-4.5-API package sources that fail to compile against R 4.6 headers
         // (the S4Vectors PRENV/Rf_findVar bug).
         assert_eq!(resolve_release(None, "4.6.0"), "3.23");
-        assert_eq!(resolve_release(None, "4.5.1"), "3.21");
+        assert_eq!(resolve_release(None, "4.5.1"), "3.22");
         assert_eq!(resolve_release(None, "4.4.0"), "3.20");
         assert_eq!(resolve_release(None, "4.3"), "3.18");
         // Unparseable / partial versions fall through to the newest known
