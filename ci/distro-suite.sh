@@ -32,6 +32,16 @@ R_LATEST="${R_VERSIONS##* }"
 # Where the tree is mounted; stages cd into scratch projects and back.
 ROOT="$(pwd)"
 
+# Resolve DIST against ROOT now, while we are still standing in it. Every stage
+# below cds into a scratch project under /tmp before invoking $UVR, and a
+# relative ./dist stops resolving the moment it does — the shell then reports
+# the binary as "not found" (exit 127), which reads like a missing artifact
+# rather than a missing directory.
+case "$DIST" in
+    /*) ;;
+    *) DIST="$ROOT/${DIST#./}" ;;
+esac
+
 # ---------------------------------------------------------------- helpers ---
 
 group() { printf '::group::%s\n' "$*"; }
@@ -134,12 +144,14 @@ xz_pkg() {
     esac
 }
 
-# uvr's auto-installer knows apk/dnf/apt-get (sync.rs::pick_sysreqs_installer).
-# On zypper/pacman hosts it would shell out to a package manager that isn't
-# there, so those distros assert the *diagnosis* instead of the install.
+# uvr's auto-installer knows apk/dnf/apt-get (sync.rs::pick_sysreqs_installer)
+# and nothing else — its last branch is an unconditional apt-get, so a host
+# without one of those three gets a command that isn't there. That includes
+# yum-only images: `dnf` is absent, so uvr falls through to apt-get, which is
+# also absent. Those distros assert the *diagnosis* instead of the install.
 sysreqs_autoinstall_supported() {
     case "$PM" in
-        apt-get|dnf|yum|apk) return 0 ;;
+        apt-get|dnf|apk) return 0 ;;
         *) return 1 ;;
     esac
 }

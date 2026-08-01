@@ -21,7 +21,7 @@ runtime="${CONTAINER_RUNTIME:-docker}"
 
 keys="$*"
 
-jq -r '.[] | "\(.key)\t\(.image)"' "$matrix" | while IFS="$(printf '\t')" read -r key image; do
+jq -r '.distros[] | "\(.key)\t\(.image)"' "$matrix" | while IFS="$(printf '\t')" read -r key image; do
     if [ -n "$keys" ]; then
         case " $keys " in
             *" $key "*) ;;

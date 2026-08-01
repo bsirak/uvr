@@ -64,10 +64,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: pick
+        # Through the environment rather than interpolated into the script:
+        # `inputs.keys` is free text supplied at dispatch time, and pasting it
+        # between quotes in a shell line lets it close the quote and run the
+        # rest.
+        env:
+          WANT: ${{ github.event_name == 'pull_request' && 'pr' || inputs.keys || 'all' }}
         run: |
           set -euo pipefail
           matrix=crates/uvr-core/tests/distro_matrix.json
-          want='${{ github.event_name == 'pull_request' && 'pr' || inputs.keys || 'all' }}'
+          want="$WANT"
           case "$want" in
             all) sel="$(jq -c '[.distros[]]' "$matrix")" ;;
             pr)  sel="$(jq -c '[.distros[] | select(.lane == "pr")]' "$matrix")" ;;
@@ -148,11 +154,20 @@ jobs:
       # Checking out on the host and mounting the tree in gives one shape that
       # works for all 29 images.
       - name: Suite in ${{ matrix.entry.image }}
+        # `arch` and `amazonlinux-2023` are in the matrix precisely because
+        # neither sysreqs catalog covers them — `api: false, local: false`. The
+        # sysreqs stage asserts that uvr names this distro's libxml2 devel
+        # package, which for those two it correctly cannot, so running the
+        # stage would assert the opposite of what the matrix records. Skip it
+        # there and let the earlier stages carry them.
+        env:
+          SKIP_STAGES: ${{ !matrix.entry.sysreqs.api && !matrix.entry.sysreqs.local && 'sysreqs' || '' }}
         run: |
           docker run --rm \
             -v "$PWD:/work" -w /work \
             -e "R_VERSIONS=${R_VERSIONS}" \
             -e "SMOKE_PKG=${SMOKE_PKG}" \
+            -e "SKIP_STAGES=${SKIP_STAGES}" \
             "${{ matrix.entry.image }}" \
             sh ci/distro-suite.sh
 
