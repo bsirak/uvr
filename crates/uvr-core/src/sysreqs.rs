@@ -95,6 +95,8 @@ struct PpmSysreqsResponse {
 #[derive(Debug, Deserialize)]
 struct PpmRequirement {
     #[serde(default)]
+    name: String,
+    #[serde(default)]
     requirements: PpmRequirementDetail,
 }
 
@@ -102,6 +104,33 @@ struct PpmRequirement {
 struct PpmRequirementDetail {
     #[serde(default)]
     packages: Vec<String>,
+}
+
+/// Index a batched (`all=true`) sysreqs response by R package name.
+///
+/// Packages absent from the map declare no system requirements — the API
+/// only lists those that do.
+fn parse_sysreqs_index(body: &str) -> HashMap<String, Vec<SysReq>> {
+    let mut index: HashMap<String, Vec<SysReq>> = HashMap::new();
+    let response: PpmSysreqsResponse = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to parse Posit sysreqs index: {e}");
+            return index;
+        }
+    };
+    for req in response.requirements {
+        if req.name.is_empty() {
+            continue;
+        }
+        let entry = index.entry(req.name).or_default();
+        for pkg in req.requirements.packages {
+            if !pkg.is_empty() {
+                entry.push(SysReq { package: pkg });
+            }
+        }
+    }
+    index
 }
 
 /// Outcome of a sysreqs API lookup.
@@ -200,6 +229,57 @@ pub async fn resolve_system_deps(
     }
 
     Ok(SysReqLookup::Supported(result))
+}
+
+/// Outcome of the one-per-sync batched sysreqs fetch.
+enum SysReqIndex {
+    Supported(HashMap<String, Vec<SysReq>>),
+    UnsupportedDistro,
+    LookupFailed,
+}
+
+/// Fetch every package's system requirements for `distro` in one request.
+///
+/// Replaces the per-package `all=false&pkgname=` loop: a 68-package sync
+/// made 68 requests, where `all=true` answers in one (~150 KB, ~1125
+/// entries for ubuntu 22.04).
+async fn fetch_sysreqs_index(client: &reqwest::Client, distro: &str) -> SysReqIndex {
+    let (distribution, release) = distro.split_once('-').unwrap_or((distro, ""));
+    let url = "https://packagemanager.posit.co/__api__/repos/1/sysreqs";
+
+    debug!("Fetching Posit sysreqs index (distro={distribution}, release={release})");
+
+    let resp = client
+        .get(url)
+        .query(&[
+            ("all", "true"),
+            ("distribution", distribution),
+            ("release", release),
+        ])
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Posit sysreqs API request failed: {e}");
+            return SysReqIndex::LookupFailed;
+        }
+    };
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        if is_unsupported_system_body(&body) {
+            debug!("Posit sysreqs API reports {distribution} is unsupported");
+            return SysReqIndex::UnsupportedDistro;
+        }
+        warn!("Posit sysreqs API returned {status} for the {distribution} index");
+        return SysReqIndex::LookupFailed;
+    }
+
+    SysReqIndex::Supported(parse_sysreqs_index(&body))
 }
 
 /// Check which packages are missing on the system.
@@ -623,5 +703,39 @@ mod tests {
         };
         check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
         assert_eq!(out.local_resolved, 0);
+    }
+
+    #[test]
+    fn batched_index_is_keyed_by_package_name() {
+        // Shape of `?all=true&distribution=ubuntu&release=22.04`, which
+        // returns every package that declares sysreqs for that distro
+        // (~1125 entries, ~150 KB) in a single response.
+        let body = r#"{"requirements":[
+            {"name":"ABC.RAP","requirements":{"packages":["make"]}},
+            {"name":"curl","requirements":{"packages":["libcurl4-openssl-dev","libssl-dev"]}}
+        ]}"#;
+        let index = parse_sysreqs_index(body);
+        assert_eq!(index.len(), 2);
+        let curl: Vec<&str> = index["curl"].iter().map(|r| r.package.as_str()).collect();
+        assert_eq!(curl, vec!["libcurl4-openssl-dev", "libssl-dev"]);
+    }
+
+    #[test]
+    fn packages_absent_from_the_index_have_no_sysreqs() {
+        // The API only lists packages that declare sysreqs, so absence is
+        // "needs nothing", not an error.
+        let body =
+            r#"{"requirements":[{"name":"curl","requirements":{"packages":["libssl-dev"]}}]}"#;
+        let index = parse_sysreqs_index(body);
+        assert!(!index.contains_key("jsonlite"));
+    }
+
+    #[test]
+    fn empty_package_names_are_skipped() {
+        let body =
+            r#"{"requirements":[{"name":"x","requirements":{"packages":["","libssl-dev"]}}]}"#;
+        let index = parse_sysreqs_index(body);
+        let x: Vec<&str> = index["x"].iter().map(|r| r.package.as_str()).collect();
+        assert_eq!(x, vec!["libssl-dev"]);
     }
 }
