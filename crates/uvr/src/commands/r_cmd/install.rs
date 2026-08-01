@@ -30,6 +30,25 @@ pub async fn run(version: String, distribution: Option<String>) -> Result<()> {
         platform
     ));
 
+    // A channel is a moving target: the build behind `devel` today is not the
+    // one behind it tomorrow, so a project that pins it is not reproducible.
+    // Say so at install time — by the time it is in uvr.toml nobody re-reads
+    // the docs.
+    //
+    // Careful about the wording: an install already present short-circuits, so
+    // running this again does *not* fetch a newer build. What moves is what the
+    // name means, not what is on disk.
+    if uvr_core::r_version::downloader::is_rolling_channel(&version) {
+        ui::warn(format!(
+            "{version} is a rolling channel, not a release: it names whatever was \
+             built most recently, so this install is a snapshot of today's {version}."
+        ));
+        ui::hint(format!(
+            "Pin a numbered version for anything you need to reproduce. To move this \
+             one forward later: uvr r uninstall {version} && uvr r install {version}."
+        ));
+    }
+
     // No total `.timeout(...)` here on purpose: R archives are 100-230 MB and
     // a slow-but-moving download must never be killed (#133). Instead,
     // `connect_timeout` bounds connection establishment and `read_timeout`
