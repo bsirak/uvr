@@ -282,7 +282,7 @@ Bugs this design surfaced before any of it ran in CI, and where each landed:
 | Oracle Linux (`ID="ol"`) maps nowhere on the binary axis | #214 |
 | `rockylinux` 8 and `centos` 9/10 are not published under those names | #214 |
 | `pick_sysreqs_installer` knows only apk/dnf/apt-get, so `--install-system-deps` cannot work on openSUSE, SLES or Arch | open |
-| Alpine resolves no sysreqs at all — CRAN's `PACKAGES` carries no `SystemRequirements` | open (#207) |
+| Alpine resolves no sysreqs at all — CRAN's `PACKAGES` carries no `SystemRequirements` | #208, closing #207 — re-verified green |
 | R's `utils` calls `system(which ...)` in `.onLoad` and won't load without `which` | prerequisite here; `uvr doctor` could say so |
 | `curl` is a package *conflict* on RHEL images shipping `curl-minimal` | requested by command, not package |
 

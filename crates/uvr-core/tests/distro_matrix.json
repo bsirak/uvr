@@ -523,13 +523,13 @@
         "api": false,
         "local": true
       },
-      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Fails today — libxml2-dev is never installed and no warning is printed, which is open issue #207."
+      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Passed as of #208 — before it, libxml2-dev was never installed and no warning was printed (#207)."
     },
     {
       "key": "alpine-321",
       "image": "docker.io/library/alpine:3.21",
       "lane": "pr",
-      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Fails today — libxml2-dev is never installed and no warning is printed, which is open issue #207.",
+      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Passed as of #208 — before it, libxml2-dev was never installed and no warning was printed (#207).",
       "os_release": {
         "id": "alpine",
         "version_id": "3.21.7"
@@ -563,7 +563,7 @@
         "api": false,
         "local": true
       },
-      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Fails today — libxml2-dev is never installed and no warning is printed, which is open issue #207."
+      "note": "musl: no P3M repo exists, so the binary stage is skipped and the sysreqs local-rules path (#30) is the coverage. Passed as of #208 — before it, libxml2-dev was never installed and no warning was printed (#207)."
     },
     {
       "key": "amazonlinux-2023",
