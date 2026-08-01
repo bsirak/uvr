@@ -22,6 +22,21 @@ pub struct Manifest {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<PackageSource>,
+
+    /// Optional `[activate]` block — shell-activation preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activate: Option<ActivateMeta>,
+}
+
+/// `[activate]` — how `source .uvr/activate` behaves.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ActivateMeta {
+    /// Prefix the shell prompt with the project name while activated.
+    ///
+    /// Off by default: a mutated prompt is contentious, and plenty of users
+    /// build their own from a framework that would fight with us.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,6 +136,7 @@ impl Manifest {
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
             sources: Vec::new(),
+            activate: None,
         }
     }
 
@@ -220,6 +236,7 @@ impl Manifest {
             dependencies,
             dev_dependencies,
             sources: Vec::new(),
+            activate: None,
         })
     }
 

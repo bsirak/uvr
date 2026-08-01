@@ -83,6 +83,21 @@ jobs:
           done
           cargo run --quiet -- r list --all
 
+      # The activation tests resolve an R interpreter, so they skip in the
+      # `cargo test` step above (which runs before any R exists). Re-run them
+      # with the just-installed R on PATH — this is the only place the
+      # PowerShell isolation assertion actually executes on Windows.
+      - name: Test activation against installed R
+        shell: bash
+        run: |
+          set -euxo pipefail
+          latest="${R_VERSIONS##* }"
+          # Windows portable builds put R.exe under bin/ and bin/x64/.
+          rroot="$HOME/.uvr/r-versions/$latest"
+          export PATH="$rroot/bin:$rroot/bin/x64:$PATH"
+          R --version
+          cargo test --test cli_tests activate
+
       # Exercise the P3M binary-package install + libR-path patching that the
       # portable-build migration keeps (sync.rs). Builds a throwaway project,
       # installs a package with a compiled component, and loads it under the

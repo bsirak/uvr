@@ -31,6 +31,18 @@ Pure tracking section — fixes and small features land here between tags.
   but not 8, and rejects `fedora` and `alpine` outright — so the local rules
   remain the backstop for those.
 
+## Unreleased
+
+- **Shell activation** (#177–#180): `source .uvr/activate` puts the project's
+  managed R and isolated library into the current shell, so a bare `R` or
+  `Rscript` uses the project with no `uvr run` prefix; `deactivate` restores
+  it. Shims for bash/zsh/sh, fish, and PowerShell are written by `uvr init`
+  (or `uvr activate --write-shim`). They hold no paths — each asks uvr to
+  recompute the environment as it is sourced, so `uvr r use` / `uvr r pin`
+  can never leave a stale activation behind. Optionally prefixes the prompt
+  with the project name via `[activate] prompt = true` or
+  `UVR_ACTIVATE_PROMPT`; off by default.
+
 ## v0.4.4 (2026-07-31)
 
 The biggest release yet, driven by a wave of new users: GitLab-hosted

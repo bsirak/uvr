@@ -644,3 +644,226 @@ fn lock_with_binary_capable_source_records_source_urls() {
         "lockfile should record the source URL from rpkgs-stub: {lock}"
     );
 }
+
+#[test]
+fn test_init_writes_activation_shims() {
+    let dir = init_project("shimproj");
+    for shim in ["activate", "activate.fish", "activate.ps1"] {
+        let path = dir.path().join(".uvr").join(shim);
+        assert!(path.exists(), "{shim} not written by init");
+        let body = fs::read_to_string(&path).unwrap();
+        // The staleness guarantee: shims delegate, never bake in paths.
+        assert!(
+            body.contains("uvr activate --emit"),
+            "{shim} does not delegate to the binary"
+        );
+    }
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert!(
+        gitignore.contains(".uvr/activate*"),
+        "generated shims are not git-ignored: {gitignore}"
+    );
+}
+
+#[test]
+fn test_activate_emit_outside_project_fails() {
+    // Must fail loudly so the shim's `&& eval` leaves the shell untouched.
+    let dir = TempDir::new().unwrap();
+    uvr_cmd()
+        .args(["activate", "--emit", "sh"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Not inside a uvr project"));
+}
+
+/// True when uvr can resolve an R interpreter. `activate --emit` resolves R
+/// so the emitted script points at a real one, so these tests need one.
+/// CI runs `cargo test` before its R-install step.
+fn have_r() -> bool {
+    std::process::Command::new("R")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn test_activate_emit_sh_is_valid_shell() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = init_project("emitproj");
+    let out = uvr_cmd()
+        .args(["activate", "--emit", "sh"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let script = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    // Parse it with a real shell so a syntax error can't ship.
+    let mut sh = Command::new("sh");
+    sh.arg("-n").write_stdin(script.clone()).assert().success();
+
+    assert!(script.contains("R_LIBS_USER="));
+    assert!(script.contains("deactivate()"));
+    // Isolation: both Renviron gates must be blanked, or a user's
+    // ~/.Renviron can re-point R_LIBS_USER out from under the project.
+    assert!(script.contains("R_ENVIRON="));
+    assert!(script.contains("R_ENVIRON_USER="));
+}
+
+#[test]
+fn test_activate_emit_every_shell_succeeds() {
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = init_project("allshells");
+    for shell in ["sh", "bash", "zsh", "fish", "powershell"] {
+        uvr_cmd()
+            .args(["activate", "--emit", shell])
+            .current_dir(dir.path())
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("R_LIBS_USER"));
+    }
+}
+
+/// True when a fish interpreter is on PATH.
+fn have_fish() -> bool {
+    std::process::Command::new("fish")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn test_activate_emit_fish_is_valid_fish() {
+    // fish's emitter is the most structurally different of the three (list
+    // PATH, `set -q`, function-based prompt) and was the only one never
+    // handed to a real interpreter.
+    if !have_fish() || !have_r() {
+        eprintln!("skipping: need fish and R");
+        return;
+    }
+    let dir = init_project("fishproj");
+    let out = uvr_cmd()
+        .args(["activate", "--emit", "fish"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let script = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    let f = dir.path().join("emitted.fish");
+    fs::write(&f, &script).unwrap();
+    Command::new("fish").arg("-n").arg(&f).assert().success();
+
+    assert!(script.contains("set -gx R_LIBS_USER"));
+    assert!(script.contains("function deactivate"));
+}
+
+#[test]
+fn test_activate_write_shim_restores_deleted_shims() {
+    let dir = init_project("restoreproj");
+    let fish = dir.path().join(".uvr").join("activate.fish");
+    fs::remove_file(&fish).unwrap();
+    assert!(!fish.exists());
+
+    uvr_cmd()
+        .args(["activate", "--write-shim"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert!(fish.exists(), "--write-shim did not restore the fish shim");
+}
+
+/// True when a PowerShell interpreter is on PATH.
+fn have_pwsh() -> bool {
+    std::process::Command::new("pwsh")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn test_activate_powershell_isolation_survives_a_real_shell() {
+    // Runs wherever pwsh exists — notably the windows-latest CI runner.
+    //
+    // The load-bearing assertion is that `$env:R_LIBS_SITE` is *present and
+    // empty* after the emitted script runs. Win32's SetEnvironmentVariable
+    // deletes a variable assigned an empty string, and if PowerShell routes
+    // through that on Windows, the three blanked isolation variables would
+    // become absent and R would fall back to the system site library. Verified
+    // correct on PowerShell 7.6 for Linux; this test is what would catch the
+    // Windows case before a user does.
+    if !have_pwsh() {
+        eprintln!("skipping: pwsh not installed");
+        return;
+    }
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+
+    let dir = init_project("psiso");
+    let out = uvr_cmd()
+        .args(["activate", "--emit", "powershell"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let script = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    let emitted = dir.path().join("emitted.ps1");
+    fs::write(&emitted, &script).unwrap();
+
+    let runner = dir.path().join("runner.ps1");
+    fs::write(
+        &runner,
+        format!(
+            r#". "{}"
+Write-Output ("LIBS_USER=" + $env:R_LIBS_USER)
+Write-Output ("SITE_PRESENT=" + (Test-Path Env:\R_LIBS_SITE))
+Write-Output ("SITE_VALUE=[" + $env:R_LIBS_SITE + "]")
+Write-Output ("ENVIRON_USER_PRESENT=" + (Test-Path Env:\R_ENVIRON_USER))
+Write-Output ("PROJECT=" + $env:UVR_PROJECT)
+deactivate
+Write-Output ("AFTER_PROJECT_PRESENT=" + (Test-Path Env:\UVR_PROJECT))
+Write-Output ("AFTER_DEACTIVATE_PRESENT=" + (Test-Path Function:\deactivate))
+"#,
+            emitted.display()
+        ),
+    )
+    .unwrap();
+
+    let res = std::process::Command::new("pwsh")
+        .args(["-NoProfile", "-File"])
+        .arg(&runner)
+        .output()
+        .expect("run pwsh");
+    let stdout = String::from_utf8_lossy(&res.stdout);
+    assert!(
+        res.status.success(),
+        "pwsh failed: {}\n{}",
+        String::from_utf8_lossy(&res.stderr),
+        stdout
+    );
+
+    assert!(
+        stdout.contains("SITE_PRESENT=True"),
+        "R_LIBS_SITE was deleted rather than set empty — the system site \
+         library is no longer shadowed:\n{stdout}"
+    );
+    assert!(stdout.contains("SITE_VALUE=[]"), "{stdout}");
+    assert!(stdout.contains("ENVIRON_USER_PRESENT=True"), "{stdout}");
+    assert!(stdout.contains("PROJECT=psiso"), "{stdout}");
+    // deactivate must leave nothing of ours behind.
+    assert!(stdout.contains("AFTER_PROJECT_PRESENT=False"), "{stdout}");
+    assert!(
+        stdout.contains("AFTER_DEACTIVATE_PRESENT=False"),
+        "{stdout}"
+    );
+}

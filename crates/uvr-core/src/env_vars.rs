@@ -5,6 +5,22 @@ fn read_env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// UVR_ACTIVATE_PROMPT
+///
+/// Controls whether `source .uvr/activate` prefixes the shell prompt with the
+/// project name. Accepts `1`/`true`/`yes` to enable and `0`/`false`/`no` to
+/// disable; anything else is ignored. Overrides `[activate] prompt` in
+/// `uvr.toml`, so a user can opt out of a project that opts in.
+/// Defaults to disabled.
+pub fn activate_prompt() -> Option<bool> {
+    let raw = read_env_var("UVR_ACTIVATE_PROMPT")?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 /// UVR_CACHE_DIR
 ///
 /// Gets the directory where uvr stores cached packages, environments, and tarballs.
@@ -216,6 +232,7 @@ mod tests {
         let _env = env_lock();
         // Backup original env vars if present so we don't permanently mess up the test runner environment
         let vars_to_test = [
+            "UVR_ACTIVATE_PROMPT",
             "UVR_CACHE_DIR",
             "UVR_EXTRA_LIBS",
             "UVR_INSTALL_DIR",
@@ -234,6 +251,7 @@ mod tests {
         assert!(default_cache.is_some());
         assert!(default_cache.unwrap().ends_with("cache"));
 
+        assert_eq!(activate_prompt(), None);
         assert_eq!(extra_libs(), None);
         assert_eq!(install_dir(), None);
         assert_eq!(install_timeout(), None);
@@ -346,5 +364,31 @@ mod tests {
         // whitespace-only → None
         env::set_var("UVR_REPOS", "  ");
         assert!(repos().is_none());
+    }
+
+    #[test]
+    fn test_activate_prompt_parsing() {
+        let _env = env_lock();
+        let _guard = EnvGuard::new(&["UVR_ACTIVATE_PROMPT"]);
+
+        for on in ["1", "true", "TRUE", "yes", "on", "  1  "] {
+            env::set_var("UVR_ACTIVATE_PROMPT", on);
+            assert_eq!(activate_prompt(), Some(true), "{on:?} should enable");
+        }
+        for off in ["0", "false", "FALSE", "no", "off"] {
+            env::set_var("UVR_ACTIVATE_PROMPT", off);
+            assert_eq!(activate_prompt(), Some(false), "{off:?} should disable");
+        }
+        // Unrecognized values fall through to None so the manifest still
+        // decides, rather than a typo silently forcing the prompt off.
+        for junk in ["maybe", "2", "-"] {
+            env::set_var("UVR_ACTIVATE_PROMPT", junk);
+            assert_eq!(activate_prompt(), None, "{junk:?} should be ignored");
+        }
+        // Empty / whitespace-only is treated as unset, like every other var.
+        env::set_var("UVR_ACTIVATE_PROMPT", "   ");
+        assert_eq!(activate_prompt(), None);
+        env::remove_var("UVR_ACTIVATE_PROMPT");
+        assert_eq!(activate_prompt(), None);
     }
 }
