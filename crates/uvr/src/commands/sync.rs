@@ -943,7 +943,11 @@ async fn install_from_lockfile_with_r(
                             .is_some_and(|s| !s.trim().is_empty())
                     });
 
-                    if check.lookup_failed && check.missing.is_empty() && any_has_sysreqs {
+                    if check.lookup_failed
+                        && check.missing.is_empty()
+                        && check.local_resolved == 0
+                        && any_has_sysreqs
+                    {
                         // The sysreqs API couldn't be reached/parsed for at least
                         // one package and the local-rules fallback found nothing
                         // missing (#148). Say the check was degraded rather than
@@ -959,18 +963,19 @@ async fn install_from_lockfile_with_r(
                         eprintln!();
                     } else if check.unsupported_distro
                         && check.missing.is_empty()
+                        && check.local_resolved == 0
                         && any_has_sysreqs
                     {
-                        // PPM doesn't cover this distro AND the local fallback
-                        // found nothing (either no rule matched any of the
-                        // declared SystemRequirements, or the local rules are
-                        // out of date). Tell the user we skipped the check
-                        // rather than silently claiming everything is fine.
+                        // The API declined this distro AND the vendored rules
+                        // matched none of the declared SystemRequirements. Only
+                        // then was the check genuinely skipped: when the local
+                        // rules did resolve, an empty `missing` means every
+                        // requirement is already installed.
                         eprintln!();
                         ui::warn_block(
                             &format!("System dependency check skipped on {distro}"),
                             vec![
-                                "Posit's sysreqs catalog doesn't cover this distribution, and the local fallback had no applicable rules.".to_string(),
+                                "Posit's sysreqs API doesn't serve this distribution, and no vendored rule matched the declared SystemRequirements.".to_string(),
                                 "Packages with system-library requirements may fail to compile from source.".to_string(),
                             ],
                         );
