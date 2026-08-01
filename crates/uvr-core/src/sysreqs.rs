@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::error::Result;
 use crate::sysreqs_rules;
 
 /// A resolved system dependency with its apt/rpm package name.
@@ -95,6 +94,8 @@ struct PpmSysreqsResponse {
 #[derive(Debug, Deserialize)]
 struct PpmRequirement {
     #[serde(default)]
+    name: String,
+    #[serde(default)]
     requirements: PpmRequirementDetail,
 }
 
@@ -104,23 +105,33 @@ struct PpmRequirementDetail {
     packages: Vec<String>,
 }
 
-/// Outcome of a sysreqs API lookup.
+/// Index a batched (`all=true`) sysreqs response by R package name.
 ///
-/// `UnsupportedDistro` lets callers tell "no system deps needed" apart from
-/// "we couldn't check because Posit's catalog doesn't cover this distro"
-/// (e.g. Alpine — see issue #30). Silently treating the latter as the former
-/// makes uvr act like it verified sysreqs when it actually skipped them,
-/// which bites users whose packages then fail to compile from source.
-#[derive(Debug, Clone)]
-pub enum SysReqLookup {
-    Supported(Vec<SysReq>),
-    UnsupportedDistro,
-    /// The API couldn't be consulted at all (network failure, non-success
-    /// HTTP status, unparseable body). Distinct from `Supported(vec![])` —
-    /// "no sysdeps needed" — so callers can fall back to the vendored local
-    /// rules instead of silently acting as if the check passed (#148). An
-    /// offline CI runner used to get neither API nor local results.
-    LookupFailed,
+/// Packages absent from the map declare no system requirements — the API
+/// only lists those that do.
+///
+/// Fallible on purpose: an infallible version that swallowed the parse error
+/// into an empty map would make a malformed 200 response look identical to
+/// "no package on this distro needs anything", silently and on every distro.
+/// The per-package path this replaces mapped a parse failure to
+/// `LookupFailed`; keep that.
+fn parse_sysreqs_index(
+    body: &str,
+) -> std::result::Result<HashMap<String, Vec<SysReq>>, serde_json::Error> {
+    let mut index: HashMap<String, Vec<SysReq>> = HashMap::new();
+    let response: PpmSysreqsResponse = serde_json::from_str(body)?;
+    for req in response.requirements {
+        if req.name.is_empty() {
+            continue;
+        }
+        let entry = index.entry(req.name).or_default();
+        for pkg in req.requirements.packages {
+            if !pkg.is_empty() {
+                entry.push(SysReq { package: pkg });
+            }
+        }
+    }
+    Ok(index)
 }
 
 /// Detects the Posit PPM "Unsupported system" error body.
@@ -132,30 +143,28 @@ fn is_unsupported_system_body(body: &str) -> bool {
     body.contains("Unsupported system")
 }
 
-/// Query the Posit Package Manager sysreqs API for system dependencies.
-///
-/// API: `GET https://packagemanager.posit.co/__api__/repos/1/sysreqs?all=false&pkgname=<name>&distribution=<os>&release=<version>`
-///
-/// This replaces the archived r-hub sysreqs API with Posit's actively
-/// maintained r-system-requirements catalog.
-pub async fn resolve_system_deps(
-    client: &reqwest::Client,
-    package_name: &str,
-    distro: &str,
-) -> Result<SysReqLookup> {
-    let (distribution, release) = distro.split_once('-').unwrap_or((distro, ""));
+/// Outcome of the one-per-sync batched sysreqs fetch.
+enum SysReqIndex {
+    Supported(HashMap<String, Vec<SysReq>>),
+    UnsupportedDistro,
+    LookupFailed,
+}
 
+/// Fetch every package's system requirements for `distro` in one request.
+///
+/// Replaces the per-package `all=false&pkgname=` loop: a 68-package sync
+/// made 68 requests, where `all=true` answers in one (~150 KB, ~1125
+/// entries for ubuntu 22.04).
+async fn fetch_sysreqs_index(client: &reqwest::Client, distro: &str) -> SysReqIndex {
+    let (distribution, release) = distro.split_once('-').unwrap_or((distro, ""));
     let url = "https://packagemanager.posit.co/__api__/repos/1/sysreqs";
 
-    debug!(
-        "Querying Posit sysreqs API for {package_name} (distro={distribution}, release={release})"
-    );
+    debug!("Fetching Posit sysreqs index (distro={distribution}, release={release})");
 
     let resp = client
         .get(url)
         .query(&[
-            ("all", "false"),
-            ("pkgname", package_name),
+            ("all", "true"),
             ("distribution", distribution),
             ("release", release),
         ])
@@ -166,7 +175,7 @@ pub async fn resolve_system_deps(
         Ok(r) => r,
         Err(e) => {
             warn!("Posit sysreqs API request failed: {e}");
-            return Ok(SysReqLookup::LookupFailed);
+            return SysReqIndex::LookupFailed;
         }
     };
 
@@ -176,30 +185,19 @@ pub async fn resolve_system_deps(
     if !status.is_success() {
         if is_unsupported_system_body(&body) {
             debug!("Posit sysreqs API reports {distribution} is unsupported");
-            return Ok(SysReqLookup::UnsupportedDistro);
+            return SysReqIndex::UnsupportedDistro;
         }
-        warn!("Posit sysreqs API returned {status} for {package_name}");
-        return Ok(SysReqLookup::LookupFailed);
+        warn!("Posit sysreqs API returned {status} for the {distribution} index");
+        return SysReqIndex::LookupFailed;
     }
 
-    let response: PpmSysreqsResponse = match serde_json::from_str(&body) {
-        Ok(r) => r,
+    match parse_sysreqs_index(&body) {
+        Ok(index) => SysReqIndex::Supported(index),
         Err(e) => {
-            warn!("Failed to parse Posit sysreqs API response: {e}");
-            return Ok(SysReqLookup::LookupFailed);
-        }
-    };
-
-    let mut result = Vec::new();
-    for req in response.requirements {
-        for pkg in req.requirements.packages {
-            if !pkg.is_empty() {
-                result.push(SysReq { package: pkg });
-            }
+            warn!("Failed to parse Posit sysreqs index: {e}");
+            SysReqIndex::LookupFailed
         }
     }
-
-    Ok(SysReqLookup::Supported(result))
 }
 
 /// Check which packages are missing on the system.
@@ -244,9 +242,9 @@ pub struct SysReqsCheck {
     /// rules still ran, so `missing` may well be authoritative. Read this
     /// together with `local_resolved` before claiming the check was skipped.
     pub unsupported_distro: bool,
-    /// Set when at least one API lookup failed outright (network/HTTP/parse,
-    /// #148). Affected packages were checked against the vendored local
-    /// rules instead.
+    /// Set when the single batched index fetch failed outright
+    /// (network/HTTP/parse, #148). Every package was checked against the
+    /// vendored local rules instead.
     pub lookup_failed: bool,
     /// Number of packages the vendored local rules resolved to at least one
     /// system package. Distinguishes "the fallback ran and found nothing
@@ -265,86 +263,107 @@ pub struct PackageSysReqQuery {
     /// the vendored `r-system-requirements` rules locally.
     pub system_requirements: Option<String>,
     /// True for Bioconductor-sourced packages. The Posit sysreqs API only
-    /// covers CRAN and returns HTTP 500 for Bioc names, so querying it is a
-    /// guaranteed per-package WARN with zero information (#202) — Bioc
-    /// packages go straight to the vendored local rules instead.
+    /// covers CRAN and returns HTTP 500 for Bioc names, so looking one up in
+    /// the fetched index would be a guaranteed non-match with zero
+    /// information (#202) — Bioc packages go straight to the vendored local
+    /// rules instead.
     pub bioc: bool,
 }
 
 /// Resolve and check system dependencies for a set of packages.
 ///
 /// Flow:
-/// 1. Query Posit's sysreqs API per package.
-/// 2. If PPM reports `UnsupportedDistro` (e.g. Alpine), stop querying and
-///    fall back to the vendored `r-system-requirements` rules. The fallback
-///    matches each package's `SystemRequirements` string against the local
-///    rule table. This is the path that addresses issue #30 end-to-end.
-/// 3. Filter the resolved deps through the installed package manager
+/// 1. Fetch the whole distro's sysreqs index in a single batched request
+///    (see `fetch_sysreqs_index`).
+/// 2. If PPM reports `UnsupportedDistro` (e.g. Alpine) or the fetch failed
+///    outright, fall back to the vendored `r-system-requirements` rules for
+///    every package. The fallback matches each package's
+///    `SystemRequirements` string against the local rule table. This is the
+///    path that addresses issue #30 end-to-end.
+/// 3. Bioc packages always go straight to the local rules, regardless of
+///    the index outcome — the Posit API is CRAN-only and 500s for Bioc
+///    names (#202).
+/// 4. Filter the resolved deps through the installed package manager
 ///    (`dpkg`/`rpm`/`apk`) to surface only the ones that are actually
 ///    missing.
 ///
-/// Returns both the missing-deps map and a flag indicating whether PPM
-/// rejected the distribution (set true even when the local fallback fills
-/// in results, so callers can mention the provenance if they want).
+/// Returns both the missing-deps map and flags indicating whether PPM
+/// rejected the distribution or the fetch failed (set true even when the
+/// local fallback fills in results, so callers can mention the provenance if
+/// they want).
 pub async fn check_system_deps(
     client: &reqwest::Client,
     packages: &[PackageSysReqQuery],
     distro: &str,
 ) -> SysReqsCheck {
     let mut out = SysReqsCheck::default();
-    let mut local_fallback = false;
-    let mut tail_start: usize = 0;
 
-    for (idx, pkg) in packages.iter().enumerate() {
-        // The Posit API is CRAN-only; Bioc names 500 every time. Check them
-        // against the vendored local rules directly — no request, no WARN,
-        // and no degraded-check flag, since nothing actually degraded (#202).
-        if pkg.bioc {
-            check_pkg_local(&mut out, pkg, distro);
-            continue;
-        }
-        match resolve_system_deps(client, &pkg.name, distro).await {
-            Ok(SysReqLookup::Supported(resolved)) => {
-                let missing = filter_missing(&resolved);
-                if !missing.is_empty() {
-                    out.missing
-                        .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
-                }
-            }
-            Ok(SysReqLookup::UnsupportedDistro) => {
+    // Skip the fetch entirely when every package in the sync is Bioc-sourced:
+    // the index would never be consulted (see the loop below), so fetching
+    // it would just be a wasted round trip that could also spuriously flag
+    // `lookup_failed` on a network hiccup, even though nothing in this sync
+    // actually depended on reaching the API (#202).
+    let needs_index = packages.iter().any(|pkg| !pkg.bioc);
+
+    // One request for the whole sync, not one per package.
+    let index = if needs_index {
+        match fetch_sysreqs_index(client, distro).await {
+            SysReqIndex::Supported(idx) => Some(idx),
+            SysReqIndex::UnsupportedDistro => {
                 out.unsupported_distro = true;
-                local_fallback = true;
-                tail_start = idx;
-                break;
+                None
             }
-            Ok(SysReqLookup::LookupFailed) => {
-                // API unreachable/broken for this package (#148): check it
-                // against the vendored local rules instead of pretending the
-                // check passed, but keep querying the API for the rest — a
-                // transient per-request failure shouldn't downgrade the
-                // whole run to local rules.
+            SysReqIndex::LookupFailed => {
                 out.lookup_failed = true;
-                check_pkg_local(&mut out, pkg, distro);
-            }
-            Err(e) => {
-                warn!("Failed to resolve system deps for {}: {e}", pkg.name);
+                None
             }
         }
-    }
+    } else {
+        None
+    };
 
-    if local_fallback {
-        for pkg in &packages[tail_start..] {
-            check_pkg_local(&mut out, pkg, distro);
-        }
-    }
+    apply_index(&mut out, packages, index.as_ref(), distro);
 
     out
 }
 
+/// Decide, per package, whether to use the fetched index or the vendored
+/// local rules, and record the outcome.
+///
+/// Synchronous and free of I/O beyond `filter_missing`'s package-manager
+/// queries, so it can be exercised directly with a hand-built `index`
+/// instead of requiring network access — that is the whole reason this is
+/// split out of `check_system_deps`.
+fn apply_index(
+    out: &mut SysReqsCheck,
+    packages: &[PackageSysReqQuery],
+    index: Option<&HashMap<String, Vec<SysReq>>>,
+    distro: &str,
+) {
+    for pkg in packages {
+        // The Posit API is CRAN-only; Bioc names are absent from its index,
+        // so check them against the vendored local rules directly (#202).
+        let Some(index) = index.filter(|_| !pkg.bioc) else {
+            check_pkg_local(out, pkg, distro);
+            continue;
+        };
+        let Some(resolved) = index.get(&pkg.name) else {
+            // Absent from the index means the package declares no system
+            // requirements, which is the common case.
+            continue;
+        };
+        let missing = filter_missing(resolved);
+        if !missing.is_empty() {
+            out.missing
+                .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
+        }
+    }
+}
+
 /// Check one package's `SystemRequirements` against the vendored
 /// `r-system-requirements` rules and record any missing system packages.
-/// Shared by the unsupported-distro tail fallback and the per-package
-/// API-failure fallback (#148).
+/// Shared by the unsupported-distro / lookup-failed fallback in
+/// `apply_index` and the direct Bioc bypass in the same function.
 fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &str) {
     let (distribution, version) = distro.split_once('-').unwrap_or((distro, ""));
     let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
@@ -623,5 +642,169 @@ mod tests {
         };
         check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
         assert_eq!(out.local_resolved, 0);
+    }
+
+    #[test]
+    fn no_index_falls_back_to_local_rules_for_every_package() {
+        // The unsupported-distro / lookup-failed case: `apply_index` gets
+        // `index = None` and must run every package through the vendored
+        // local rules rather than skipping them. Assert on `local_resolved`,
+        // not `missing` — the counter is incremented before `filter_missing`
+        // runs, so it holds regardless of what is installed on the test
+        // host (the Alpine bug this whole check exists to catch).
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "xml2".to_string(),
+            system_requirements: Some(
+                "libxml2: libxml2-dev (deb), libxml2-devel (rpm)".to_string(),
+            ),
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, None, "alpine-3.23.5");
+        assert_eq!(
+            out.local_resolved, 1,
+            "with no index, xml2 must be resolved via the local rules"
+        );
+    }
+
+    #[test]
+    fn a_package_present_in_the_index_is_not_also_checked_locally() {
+        // The common, covered-distro case: when the index has an entry, it
+        // is authoritative and the local rules must NOT run — even though
+        // `system_requirements` here would resolve locally too, proving the
+        // index path was actually taken instead of the fallback.
+        let mut index = HashMap::new();
+        index.insert(
+            "curl".to_string(),
+            vec![SysReq {
+                package: "libcurl4-openssl-dev".to_string(),
+            }],
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "curl".to_string(),
+            system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        assert_eq!(
+            out.local_resolved, 0,
+            "curl is in the index, so the local rules must be bypassed entirely"
+        );
+    }
+
+    #[test]
+    fn a_package_absent_from_the_index_is_skipped_not_faulted() {
+        // Absence from the index means "declares no system requirements",
+        // per `parse_sysreqs_index`'s own contract — not an error, and not
+        // a reason to fall back to local rules for that package.
+        //
+        // `system_requirements` is deliberately set to a string that WOULD
+        // resolve locally (the same trigger already verified elsewhere in
+        // this file to resolve on ubuntu-22.04) so this test can actually
+        // tell "skipped" apart from "silently fell back to local rules" —
+        // with `None` here, both behaviours produce identical output
+        // (`check_pkg_local` no-ops on `None` regardless), making the
+        // assertions vacuous.
+        let mut index = HashMap::new();
+        index.insert(
+            "curl".to_string(),
+            vec![SysReq {
+                package: "libcurl4-openssl-dev".to_string(),
+            }],
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "jsonlite".to_string(),
+            system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        assert!(
+            out.missing.is_empty(),
+            "a package absent from the index must not produce a missing entry"
+        );
+        assert_eq!(
+            out.local_resolved, 0,
+            "a package absent from the index must not fall back to local rules"
+        );
+    }
+
+    #[test]
+    fn mixed_bioc_and_cran_packages_split_between_index_and_local_rules() {
+        // The subtle case the `.filter(|_| !pkg.bioc)` line encodes: in a
+        // single sync with a fetched index, the Bioc package must still go
+        // to the local rules while the CRAN package alongside it uses the
+        // index, even though both apply_index calls share the same `Some`
+        // index.
+        let mut index = HashMap::new();
+        index.insert(
+            "curl".to_string(),
+            vec![SysReq {
+                package: "libcurl4-openssl-dev".to_string(),
+            }],
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![
+            PackageSysReqQuery {
+                name: "Rhtslib".to_string(),
+                system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
+                bioc: true,
+            },
+            PackageSysReqQuery {
+                name: "curl".to_string(),
+                system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
+                bioc: false,
+            },
+        ];
+        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        assert_eq!(
+            out.local_resolved, 1,
+            "only the Bioc package (Rhtslib) should have gone through the local rules"
+        );
+    }
+
+    #[test]
+    fn batched_index_is_keyed_by_package_name() {
+        // Shape of `?all=true&distribution=ubuntu&release=22.04`, which
+        // returns every package that declares sysreqs for that distro
+        // (~1125 entries, ~150 KB) in a single response.
+        let body = r#"{"requirements":[
+            {"name":"ABC.RAP","requirements":{"packages":["make"]}},
+            {"name":"curl","requirements":{"packages":["libcurl4-openssl-dev","libssl-dev"]}}
+        ]}"#;
+        let index = parse_sysreqs_index(body).unwrap();
+        assert_eq!(index.len(), 2);
+        let curl: Vec<&str> = index["curl"].iter().map(|r| r.package.as_str()).collect();
+        assert_eq!(curl, vec!["libcurl4-openssl-dev", "libssl-dev"]);
+    }
+
+    #[test]
+    fn packages_absent_from_the_index_have_no_sysreqs() {
+        // The API only lists packages that declare sysreqs, so absence is
+        // "needs nothing", not an error.
+        let body =
+            r#"{"requirements":[{"name":"curl","requirements":{"packages":["libssl-dev"]}}]}"#;
+        let index = parse_sysreqs_index(body).unwrap();
+        assert!(!index.contains_key("jsonlite"));
+    }
+
+    #[test]
+    fn empty_package_names_are_skipped() {
+        let body =
+            r#"{"requirements":[{"name":"x","requirements":{"packages":["","libssl-dev"]}}]}"#;
+        let index = parse_sysreqs_index(body).unwrap();
+        let x: Vec<&str> = index["x"].iter().map(|r| r.package.as_str()).collect();
+        assert_eq!(x, vec!["libssl-dev"]);
+    }
+
+    #[test]
+    fn malformed_index_body_is_an_error_not_an_empty_map() {
+        // A malformed or truncated 200 response must not be silently treated
+        // as "no package on this distro needs anything" — that would be
+        // indistinguishable from a genuinely empty, well-formed index. This
+        // is what routes `fetch_sysreqs_index` to `LookupFailed` instead of
+        // `Supported(HashMap::new())` on a broken body.
+        assert!(parse_sysreqs_index("{not json").is_err());
     }
 }
