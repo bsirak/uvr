@@ -1118,7 +1118,21 @@ async fn install_from_lockfile_with_r(
                                     // found" for packages that exist. Best-effort
                                     // — a failed refresh still lets the install
                                     // try (it may have usable cached lists).
+                                    //
+                                    // Before the rules' own setup, not after:
+                                    // `gdal.json` opens its Ubuntu pre_install
+                                    // with `apt-get install -y
+                                    // software-properties-common`, which needs
+                                    // lists a fresh container doesn't have. The
+                                    // rules re-refresh themselves where their own
+                                    // repo additions require it (that same rule
+                                    // ends with `apt-get update` after the PPA).
                                     run_sysreqs_refresh();
+                                    // Setup next: several rules need a repo
+                                    // enabled (EPEL, crb) before their packages
+                                    // exist. Entries contain shell operators,
+                                    // so they go through `sh -c`.
+                                    run_rule_commands(&check.pre_install, "setup")?;
                                     ui::info(format!("Running: {install_cmd_display}"));
                                     let mut cmd = std::process::Command::new(&install_program);
                                     cmd.args(&install_args);
@@ -1138,6 +1152,7 @@ async fn install_from_lockfile_with_r(
                                             status.code().unwrap_or(-1)
                                         );
                                     }
+                                    run_rule_commands(&check.post_install, "post-install")?;
                                     ui::success("System dependencies installed.");
                                 } else {
                                     ui::hint(&install_hint);
@@ -1147,7 +1162,13 @@ async fn install_from_lockfile_with_r(
                                 }
                             }
                             (false, _) => {
+                                for cmd in &check.pre_install {
+                                    ui::hint(format!("First run: {cmd}"));
+                                }
                                 ui::hint(&install_hint);
+                                for cmd in &check.post_install {
+                                    ui::hint(format!("Then run: {cmd}"));
+                                }
                                 ui::hint(
                                     "Or set --install-system-deps / UVR_INSTALL_SYSREQS=1 to let uvr run that for you.",
                                 );
@@ -1791,6 +1812,31 @@ fn local_check_incomplete(
     check.missing.is_empty() && pkgs_with_sysreqs > 0 && check.local_resolved < pkgs_with_sysreqs
 }
 
+
+
+/// Run a rule's setup/post-install commands via `sh -c`: entries such as
+/// `rpm -q epel-release || yum install -y https://...` rely on shell
+/// operators, so a direct `Command::new` of the first token would break
+/// them. Bails on the first failing command with the exit code and the
+/// offending command so the user can re-run it manually.
+#[cfg(target_os = "linux")]
+fn run_rule_commands(cmds: &[String], phase: &str) -> Result<()> {
+    for cmd in cmds {
+        ui::info(format!("Running: {cmd}"));
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .status()
+            .with_context(|| format!("Failed to spawn: {cmd}"))?;
+        if !status.success() {
+            anyhow::bail!(
+                "System dependency {phase} failed (exit {}): {cmd}",
+                status.code().unwrap_or(-1)
+            );
+        }
+    }
+    Ok(())
+}
 /// Prompt before invoking the system package manager. Same TTY-only
 /// pattern as `confirm_library_wipe` — non-interactive sessions
 /// (CI, scripts) proceed without prompting since the user opted in via
