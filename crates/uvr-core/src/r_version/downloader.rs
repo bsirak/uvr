@@ -229,6 +229,14 @@ pub fn set_posit_distro_override(slug: String) {
     let _ = DISTRO_OVERRIDE.set(slug);
 }
 
+/// True when the user pinned the distro with `--distribution`. The live
+/// platform catalog keys off `/etc/os-release`, which is precisely what an
+/// override says not to trust, so the catalog path stands down when this is
+/// set (#54).
+pub fn distro_override_is_set() -> bool {
+    DISTRO_OVERRIDE.get().is_some()
+}
+
 /// Detect the Posit CDN distro slug from `/etc/os-release`, or use the
 /// override set by [`set_posit_distro_override`] if any.
 ///
