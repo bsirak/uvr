@@ -50,8 +50,9 @@ matrix would have produced:
 
 - **Oracle Linux is unmapped on both axes.** `oraclelinux:8` reports `ID="ol"`,
   `VERSION_ID="8.10"` → slug `ol-8.10` → no P3M codename, and `("ol","8.10")` → no
-  local rules. Oracle users get neither binaries nor sysreqs. Same shape as #209,
-  still open. Two lines fix it (`"ol"` alongside `"rhel"` in both tables).
+  local rules. Oracle users got neither binaries nor sysreqs. Same shape as #209,
+  and fixed the same way: `"ol"` alongside `"rhel"` in both tables — the sysreqs
+  half in #209, the binary half in #214.
 - **The two sysreqs sources disagree about coverage.** The API serves `rockylinux` 9
   and 10 but *not* 8; it serves no `fedora` at any release, and no `alpine` — all of
   which the vendored rules do cover. So the table records `api` and `local` as separate
@@ -148,7 +149,8 @@ and mounting the tree in gives **one shape that works for all 29 images**.
 
 **Nothing is built inside the images.** Users don't `cargo build` uvr — `install.sh`
 drops a release binary on their machine — so the artifact under test is the one that
-ships. Both Linux targets are built once in a `build` job, handed to every image, and
+ships. Both Linux targets are built once in a `build` job, through the same
+`ci/build-linux-gnu.sh` the release workflow uses (#212), then handed to every image;
 each container picks between them with the same rule `install.sh` applies:
 
 ```sh
@@ -244,7 +246,11 @@ else.
    and is independently the thing to paste into a bug report.
 2. **`ci/distro-suite.sh` + `distro-suite.yml`, PR lane only** (6 images).
 3. **Nightly lane + drift-to-issue** across all 29.
-4. **`catalog_live.rs`**, folded into `test-p3m-repos` renamed `test-catalogs`. Posit
+4. **`catalog_live.rs`**, folded into `test-p3m-repos` renamed `test-catalogs`.
+   Partly delivered: #213 reads this endpoint at runtime and ships
+   `p3m_status_live.rs`, which asserts the compiled-in table still agrees with it.
+   What remains here is the *reverse* coverage direction — what Posit supports that
+   uvr does not map. Posit
    publishes the whole supported-distro list as one documented, versioned endpoint —
    `GET /__api__/status`, described in the OpenAPI spec at `/__api__/swagger/doc.json`
    (spec version tracks the server build; `2026.06.0` at the time of writing). Each
@@ -267,10 +273,22 @@ else.
    `fedora` or `alpine` at any release). The flags can now be derived from the
    endpoint rather than maintained.
 
-Bugs this design has already surfaced, before any of it runs in CI: the Oracle Linux
-gap, the zypper/pacman installer gap, the `rockylinux` 8 API gap, and — from running
-the suite locally — that `curl` is a package conflict on RHEL images shipping
-`curl-minimal`, so tools must be requested by command rather than by package name.
+Bugs this design surfaced before any of it ran in CI, and where each landed:
+
+| Found | Fixed in |
+|---|---|
+| the published binary needs `GLIBC_2.34` and will not start on RHEL 8, Debian 11 or Ubuntu 20.04 | #212 |
+| P3M repo selection has no arch dimension, so arm64 hosts on x86_64-only distros compile everything | #213 |
+| Oracle Linux (`ID="ol"`) maps nowhere on the binary axis | #214 |
+| `rockylinux` 8 and `centos` 9/10 are not published under those names | #214 |
+| `pick_sysreqs_installer` knows only apk/dnf/apt-get, so `--install-system-deps` cannot work on openSUSE, SLES or Arch | open |
+| Alpine resolves no sysreqs at all — CRAN's `PACKAGES` carries no `SystemRequirements` | open (#207) |
+| R's `utils` calls `system(which ...)` in `.onLoad` and won't load without `which` | prerequisite here; `uvr doctor` could say so |
+| `curl` is a package *conflict* on RHEL images shipping `curl-minimal` | requested by command, not package |
+
+The first four are why this document's own matrix data had to be rewritten before
+merge: a matrix that describes gaps as open after they are closed is worse than no
+matrix, because it reads as authority.
 
 ## What this deliberately does not do
 
@@ -303,9 +321,10 @@ the suite locally — that `curl` is a package conflict on RHEL images shipping
   manylinux_2_28 aarch64  BINARY  bin/4.5-manylinux_2_28-arm64
   ```
 
-  uvr's slug → codename map has no arch dimension, so on arm64 Ubuntu 22.04, Debian
-  12, RHEL 8 or openSUSE it prefers a distro repo with no arm64 build and compiles
+  uvr's slug → codename map had no arch dimension, so on arm64 Ubuntu 22.04, Debian
+  12, RHEL 8 or openSUSE it preferred a distro repo with no arm64 build and compiled
   everything, when the portable repo would have handed it binaries. Not wrong — P3M
-  degrades to source rather than serving the wrong architecture, so nothing breaks the
-  way #175 did — but slow, and invisible. Worth its own issue; an arm64 lane in this
-  matrix is what would keep it honest.
+  degrades to source rather than serving the wrong architecture, so nothing broke the
+  way #175 did — but slow, and invisible. #213 fixes the selection by reading the
+  catalog's `arch` field; an arm64 lane in this matrix is what would keep it honest,
+  and remains unbuilt.

@@ -35,7 +35,8 @@
         "release": "20.04",
         "api": true,
         "local": true
-      }
+      },
+      "note": "Expected to fail at `uvr r install`: the portable R builds need glibc 2.34 and uvr says so explicitly. #212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error."
     },
     {
       "key": "ubuntu-2204",
@@ -92,7 +93,8 @@
         "release": "11",
         "api": true,
         "local": true
-      }
+      },
+      "note": "Expected to fail at `uvr r install`: the portable R builds need glibc 2.34 and uvr says so explicitly. #212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error."
     },
     {
       "key": "debian-12",
@@ -136,7 +138,7 @@
       "key": "rhel-8",
       "image": "registry.access.redhat.com/ubi8:latest",
       "lane": "pr",
-      "note": "The #209 image. UBI is the only RHEL testable without a subscription; it reports the same ID/VERSION_ID as subscribed RHEL, which is the axis under test.",
+      "note": "The #209 image. UBI is the only RHEL testable without a subscription; it reports the same ID/VERSION_ID as subscribed RHEL, which is the axis under test. Expected to fail at `uvr r install`: the portable R builds need glibc 2.34 and uvr says so explicitly. #212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error.",
       "os_release": {
         "id": "rhel",
         "version_id": "8.10"
@@ -194,7 +196,7 @@
       "key": "rocky-8",
       "image": "docker.io/rockylinux/rockylinux:8",
       "lane": "nightly",
-      "note": "api:false is real — Posit serves rockylinux 9 and 10 but not 8. Rocky 8 rides the local rules and reports a degraded check.",
+      "note": "api:false is the catalog fact — Posit serves rockylinux from 9 on. Since #214 uvr asks under redhat/8 and gets an authoritative answer; the local rules keep the rockylinux name, which resolves differently (leptonica-devel).",
       "os_release": {
         "id": "rocky",
         "version_id": "8.10"
@@ -265,7 +267,8 @@
         "release": "8",
         "api": false,
         "local": true
-      }
+      },
+      "note": "See rocky-8: rockylinux/8 is not published, so #214 asks under redhat/8."
     },
     {
       "key": "almalinux-9",
@@ -309,7 +312,7 @@
       "key": "centos-stream9",
       "image": "quay.io/centos/centos:stream9",
       "lane": "nightly",
-      "note": "The API stops at centos 8, but the vendored rules carry version-less centos constraints, so Stream resolves locally with a degraded-check warning.",
+      "note": "The catalog stops at centos 8. Since #214 uvr asks under redhat/9; the vendored rules keep the centos name, which resolves differently (libarchive-devel).",
       "os_release": {
         "id": "centos",
         "version_id": "9"
@@ -342,47 +345,48 @@
         "release": "10",
         "api": false,
         "local": true
-      }
+      },
+      "note": "See centos-stream9: asked under redhat/10 since #214."
     },
     {
       "key": "oracle-8",
       "image": "docker.io/library/oraclelinux:8",
       "lane": "nightly",
-      "gap": "ID=ol maps nowhere on either axis: no P3M binaries and no sysreqs from either source. Same shape as #209, still open.",
       "os_release": {
         "id": "ol",
         "version_id": "8.10"
       },
       "p3m": {
-        "slug": "ol-8.10",
-        "codename": null
+        "slug": "rhel-8",
+        "codename": "centos8"
       },
       "sysreqs": {
-        "distribution": "ol",
-        "release": "8.10",
-        "api": false,
-        "local": false
-      }
+        "distribution": "redhat",
+        "release": "8",
+        "api": true,
+        "local": true
+      },
+      "note": "ID=\"ol\" is aliased onto RHEL on both axes — sysreqs in #209, binaries in #214. Before those, Oracle hosts got neither."
     },
     {
       "key": "oracle-9",
       "image": "docker.io/library/oraclelinux:9",
       "lane": "nightly",
-      "gap": "See oracle-8.",
       "os_release": {
         "id": "ol",
         "version_id": "9.8"
       },
       "p3m": {
-        "slug": "ol-9.8",
-        "codename": null
+        "slug": "rhel-9",
+        "codename": "rhel9"
       },
       "sysreqs": {
-        "distribution": "ol",
-        "release": "9.8",
-        "api": false,
-        "local": false
-      }
+        "distribution": "redhat",
+        "release": "9",
+        "api": true,
+        "local": true
+      },
+      "note": "ID=\"ol\" is aliased onto RHEL on both axes — sysreqs in #209, binaries in #214. Before those, Oracle hosts got neither."
     },
     {
       "key": "opensuse-155",

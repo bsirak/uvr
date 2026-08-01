@@ -99,11 +99,17 @@ jobs:
             target
           key: distro-suite-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: distro-suite-cargo-
+      # The gnu build goes through the same script the release workflow uses,
+      # so the matrix exercises the artifact users actually receive — glibc
+      # floor and all. Building it any other way here would test a binary that
+      # never ships, which is the mistake this whole workflow exists to catch.
+      # musl needs no floor: it is statically linked by construction.
       - name: Build
         run: |
           set -euxo pipefail
+          sh ci/build-linux-gnu.sh x86_64-unknown-linux-gnu
+          cargo build --release --target x86_64-unknown-linux-musl --bin uvr
           for t in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
-            cargo build --release --target "$t" --bin uvr
             mkdir -p "dist/uvr-$t"
             cp "target/$t/release/uvr" "dist/uvr-$t/uvr"
           done
