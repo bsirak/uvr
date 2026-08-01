@@ -937,17 +937,20 @@ async fn install_from_lockfile_with_r(
                     // fact nothing needed checking. Gate on the presence of
                     // sysreqs so the warning fires only when there's actually
                     // a check we couldn't perform.
-                    let any_has_sysreqs = queries.iter().any(|q| {
-                        q.system_requirements
-                            .as_deref()
-                            .is_some_and(|s| !s.trim().is_empty())
-                    });
+                    //
+                    // Counted, not `any()`: the gate below asks whether the
+                    // local rules covered *every* declaring package, so it
+                    // needs the denominator, not just "at least one".
+                    let pkgs_with_sysreqs = queries
+                        .iter()
+                        .filter(|q| {
+                            q.system_requirements
+                                .as_deref()
+                                .is_some_and(|s| !s.trim().is_empty())
+                        })
+                        .count();
 
-                    if check.lookup_failed
-                        && check.missing.is_empty()
-                        && check.local_resolved == 0
-                        && any_has_sysreqs
-                    {
+                    if check.lookup_failed && local_check_incomplete(&check, pkgs_with_sysreqs) {
                         // The sysreqs API couldn't be reached/parsed for at least
                         // one package and the local-rules fallback found nothing
                         // missing (#148). Say the check was degraded rather than
@@ -962,15 +965,13 @@ async fn install_from_lockfile_with_r(
                         );
                         eprintln!();
                     } else if check.unsupported_distro
-                        && check.missing.is_empty()
-                        && check.local_resolved == 0
-                        && any_has_sysreqs
+                        && local_check_incomplete(&check, pkgs_with_sysreqs)
                     {
                         // The API declined this distro AND the vendored rules
-                        // matched none of the declared SystemRequirements. Only
-                        // then was the check genuinely skipped: when the local
-                        // rules did resolve, an empty `missing` means every
-                        // requirement is already installed.
+                        // did not cover every declaring package. Only then was
+                        // part of the check genuinely skipped: for the packages
+                        // the local rules did resolve, an empty `missing` means
+                        // every requirement is already installed.
                         eprintln!();
                         ui::warn_block(
                             &format!("System dependency check skipped on {distro}"),
@@ -1625,6 +1626,32 @@ fn pick_sysreqs_installer(packages: &[&str]) -> Option<(String, Vec<String>)> {
     }
 }
 
+/// Whether the vendored local rules left part of the check unanswered.
+///
+/// `pkgs_with_sysreqs` is how many packages in this sync declare a
+/// non-empty `SystemRequirements`; `check.local_resolved` is how many of
+/// them the local rules matched to at least one system package.
+///
+/// This is deliberately a *per-package* comparison rather than
+/// `local_resolved == 0`. The any-package form silences the warning for
+/// a whole sync as soon as a single package resolves: a 40-package
+/// Alpine sync where only `xml2` matches a vendored rule would report
+/// nothing, implying uvr had checked all 40. `curl`/`openssl`/`xml2`
+/// resolve on nearly every distro, so in practice the warning became
+/// unreachable. Warn whenever at least one declaring package went
+/// unchecked.
+///
+/// `missing` must still be empty: when something is actually missing,
+/// the caller reports that instead, which is strictly more useful than a
+/// "the check may be incomplete" note.
+#[cfg(target_os = "linux")]
+fn local_check_incomplete(
+    check: &uvr_core::sysreqs::SysReqsCheck,
+    pkgs_with_sysreqs: usize,
+) -> bool {
+    check.missing.is_empty() && pkgs_with_sysreqs > 0 && check.local_resolved < pkgs_with_sysreqs
+}
+
 /// Prompt before invoking the system package manager. Same TTY-only
 /// pattern as `confirm_library_wipe` — non-interactive sessions
 /// (CI, scripts) proceed without prompting since the user opted in via
@@ -1786,6 +1813,42 @@ mod tests {
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_partially_resolved_local_check_still_warns() {
+        use uvr_core::sysreqs::SysReqsCheck;
+
+        // The case an `== 0` gate silently swallowed: 40 packages declare
+        // `SystemRequirements`, the vendored rules match exactly one of them
+        // (`xml2` on Alpine), and the other 39 were never checked. Staying
+        // quiet here implies uvr checked all 40.
+        let one_of_forty = SysReqsCheck {
+            local_resolved: 1,
+            ..Default::default()
+        };
+        assert!(local_check_incomplete(&one_of_forty, 40));
+
+        // Every declaring package resolved: nothing was skipped, so an empty
+        // `missing` is a genuine pass (the Alpine false positive in #30).
+        let all_resolved = SysReqsCheck {
+            local_resolved: 40,
+            ..Default::default()
+        };
+        assert!(!local_check_incomplete(&all_resolved, 40));
+
+        // No package declares anything: there was no check to perform.
+        assert!(!local_check_incomplete(&SysReqsCheck::default(), 0));
+
+        // Something is actually missing — the caller reports the packages
+        // instead, which supersedes any "check may be incomplete" note.
+        let with_missing = SysReqsCheck {
+            local_resolved: 1,
+            missing: std::collections::HashMap::from([("sf".to_string(), Vec::new())]),
+            ..Default::default()
+        };
+        assert!(!local_check_incomplete(&with_missing, 40));
     }
 
     #[cfg(target_os = "linux")]

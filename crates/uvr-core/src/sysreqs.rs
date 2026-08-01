@@ -586,7 +586,9 @@ mod tests {
         let mut out = SysReqsCheck::default();
         let pkg = PackageSysReqQuery {
             name: "xml2".to_string(),
-            system_requirements: Some("libxml2: libxml2-dev (deb), libxml2-devel (rpm)".to_string()),
+            system_requirements: Some(
+                "libxml2: libxml2-dev (deb), libxml2-devel (rpm)".to_string(),
+            ),
             bioc: false,
         };
         check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
