@@ -292,7 +292,12 @@ pub(crate) fn detect_posit_distro_slug_from_os_release(content: Option<&str>) ->
         }
         "debian" => format!("debian-{version_id}"),
         "centos" => format!("centos-{version_id}"),
-        "rhel" | "rocky" | "almalinux" => {
+        // Oracle Linux reports ID="ol" and is a straight RHEL rebuild, so it
+        // takes RHEL's binaries. Without this it fell through to the
+        // catch-all as `ol-8.10`, which maps to no PPM codename — Oracle
+        // users compiled everything (#209 follow-up). Kept in step with the
+        // sysreqs side of the same alias in `sysreqs::normalize_distro`.
+        "rhel" | "rocky" | "almalinux" | "ol" => {
             let major = version_id.split('.').next().unwrap_or(&version_id);
             format!("rhel-{major}")
         }

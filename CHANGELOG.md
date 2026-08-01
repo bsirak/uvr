@@ -17,6 +17,22 @@ Pure tracking section — fixes and small features land here between tags.
   without printing a sysreqs warning either. The check now runs after the
   tarballs are downloaded and reads `SystemRequirements` from each one's
   DESCRIPTION, which is where the field is actually published.
+
+- Oracle Linux gets binary packages, not just system dependencies (#209
+  follow-up). `ID="ol"` was aliased onto RHEL for sysreqs but not for the P3M
+  slug, so OL hosts resolved their system libraries correctly and then
+  compiled every package from source.
+
+- Rocky/Alma 8 and CentOS Stream 9/10 get authoritative sysreqs answers
+  instead of the local-rules fallback. Posit's catalogs serve `rockylinux`
+  from 9 on and `centos` only through 8, so those hosts fell back to the
+  vendored rules and printed a degraded-check warning for distros Posit does
+  cover, under their RHEL name. Catalogs are now asked under a name they
+  publish. The
+  local rules keep the unaliased name on purpose — they are not
+  interchangeable there: `rockylinux` 8 carries `leptonica-devel` where
+  `redhat` 8 carries nothing, and `centos` 8 wants `libarchive-devel` where
+  `redhat` 8 says `libarchive`.
 - System dependencies are resolved on RHEL and its rebuilds (#209). uvr asked
   both sysreqs catalogs under the raw `/etc/os-release` identity, which neither
   speaks: Posit's API answers `Unsupported system` for `rhel`/`8.10` but
