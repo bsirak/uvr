@@ -698,6 +698,14 @@ mod tests {
         // Absence from the index means "declares no system requirements",
         // per `parse_sysreqs_index`'s own contract — not an error, and not
         // a reason to fall back to local rules for that package.
+        //
+        // `system_requirements` is deliberately set to a string that WOULD
+        // resolve locally (the same trigger already verified elsewhere in
+        // this file to resolve on ubuntu-22.04) so this test can actually
+        // tell "skipped" apart from "silently fell back to local rules" —
+        // with `None` here, both behaviours produce identical output
+        // (`check_pkg_local` no-ops on `None` regardless), making the
+        // assertions vacuous.
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
@@ -708,7 +716,7 @@ mod tests {
         let mut out = SysReqsCheck::default();
         let packages = vec![PackageSysReqQuery {
             name: "jsonlite".to_string(),
-            system_requirements: None,
+            system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
             bioc: false,
         }];
         apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
