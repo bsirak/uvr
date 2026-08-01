@@ -240,12 +240,19 @@ pub struct SysReqsCheck {
     /// Missing system packages keyed by R package name.
     pub missing: HashMap<String, Vec<SysReq>>,
     /// Set when the Posit API reported the distro as unsupported.
-    /// When true, `missing` is not authoritative — the check was skipped.
+    /// When true, the API contributed nothing — but the vendored local
+    /// rules still ran, so `missing` may well be authoritative. Read this
+    /// together with `local_resolved` before claiming the check was skipped.
     pub unsupported_distro: bool,
     /// Set when at least one API lookup failed outright (network/HTTP/parse,
     /// #148). Affected packages were checked against the vendored local
-    /// rules instead, so `missing` is best-effort rather than authoritative.
+    /// rules instead.
     pub lookup_failed: bool,
+    /// Number of packages the vendored local rules resolved to at least one
+    /// system package. Distinguishes "the fallback ran and found nothing
+    /// missing" from "the fallback had nothing to say" — conflating those is
+    /// what made a successful Alpine check report itself as skipped.
+    pub local_resolved: usize,
 }
 
 /// R package to check sysreqs for.
@@ -350,6 +357,9 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
     if resolved.is_empty() {
         return;
     }
+    // Past this point the local rules produced a real answer for this
+    // package, whether or not anything turns out to be missing.
+    out.local_resolved += 1;
     let missing = filter_missing(&resolved);
     if !missing.is_empty() {
         out.missing
@@ -564,5 +574,54 @@ mod tests {
             pkgs.iter().any(|p| p == "libxml2-dev"),
             "expected libxml2-dev in fallback output, got {pkgs:?}"
         );
+    }
+
+    #[test]
+    fn local_resolution_is_recorded_even_when_nothing_is_missing() {
+        // The Alpine bug: the vendored rules DO resolve `libxml2` on
+        // alpine-3.23.5, so a run where every resolved package is already
+        // installed is a *successful* check, not a skipped one. The counter
+        // is incremented before `filter_missing` runs, so this assertion is
+        // independent of what is installed on the test host.
+        let mut out = SysReqsCheck::default();
+        let pkg = PackageSysReqQuery {
+            name: "xml2".to_string(),
+            system_requirements: Some(
+                "libxml2: libxml2-dev (deb), libxml2-devel (rpm)".to_string(),
+            ),
+            bioc: false,
+        };
+        check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
+        assert_eq!(
+            out.local_resolved, 1,
+            "libxml2 resolves to libxml2-dev on alpine; that is a real answer"
+        );
+    }
+
+    #[test]
+    fn no_sysreqs_field_does_not_count_as_a_local_resolution() {
+        let mut out = SysReqsCheck::default();
+        let pkg = PackageSysReqQuery {
+            name: "jsonlite".to_string(),
+            system_requirements: None,
+            bioc: false,
+        };
+        check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
+        assert_eq!(out.local_resolved, 0);
+    }
+
+    #[test]
+    fn unmatched_sysreqs_text_does_not_count_as_a_local_resolution() {
+        // A non-empty SystemRequirements string that matches no vendored rule
+        // is the genuine "we could not check this" case and must stay
+        // distinguishable from the two above.
+        let mut out = SysReqsCheck::default();
+        let pkg = PackageSysReqQuery {
+            name: "madeup".to_string(),
+            system_requirements: Some("a-library-no-rule-mentions-xyzzy".to_string()),
+            bioc: false,
+        };
+        check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
+        assert_eq!(out.local_resolved, 0);
     }
 }
