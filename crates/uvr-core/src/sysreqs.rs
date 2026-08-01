@@ -426,6 +426,10 @@ pub struct SysReqsCheck {
     /// requirement: not missing, not degraded, not skipped. Silence there is
     /// precisely the false confidence this subsystem exists to prevent.
     pub local_unresolved: usize,
+    /// Deduplicated setup commands for the rules that produced `missing`.
+    pub pre_install: Vec<String>,
+    /// Deduplicated commands to run after the package install.
+    pub post_install: Vec<String>,
 }
 
 /// R package to check sysreqs for.
@@ -544,7 +548,9 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
     let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
         return;
     };
-    let resolved: Vec<SysReq> = sysreqs_rules::resolve_local(sys_req_text, distribution, version)
+    let local = sysreqs_rules::resolve_local(sys_req_text, distribution, version);
+    let resolved: Vec<SysReq> = local
+        .packages
         .into_iter()
         .map(|package| SysReq { package })
         .collect();
@@ -562,6 +568,18 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
     out.local_resolved += 1;
     let missing = filter_missing(&resolved);
     if !missing.is_empty() {
+        // Setup commands only matter when something is actually missing —
+        // otherwise every sync on a Rocky box would re-enable EPEL.
+        for cmd in local.pre_install {
+            if !out.pre_install.contains(&cmd) {
+                out.pre_install.push(cmd);
+            }
+        }
+        for cmd in local.post_install {
+            if !out.post_install.contains(&cmd) {
+                out.post_install.push(cmd);
+            }
+        }
         out.missing
             .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
     }
@@ -709,7 +727,7 @@ mod tests {
         let (distribution, release) = normalize_distro("ol", "8.10");
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", &distribution, &release);
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-devel"),
+            pkgs.packages.iter().any(|p| p == "libxml2-devel"),
             "expected libxml2-devel for ol-8.10, got {pkgs:?}"
         );
     }
@@ -727,7 +745,7 @@ mod tests {
         );
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", "centos", "9");
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-devel"),
+            pkgs.packages.iter().any(|p| p == "libxml2-devel"),
             "expected the version-less centos rules to still resolve, got {pkgs:?}"
         );
     }
@@ -764,12 +782,12 @@ mod tests {
         let (distribution, release) = normalize_distro("rhel", "8.10");
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", &distribution, &release);
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-devel"),
+            pkgs.packages.iter().any(|p| p == "libxml2-devel"),
             "expected libxml2-devel for rhel-8.10, got {pkgs:?}"
         );
         let gdal = sysreqs_rules::resolve_local("GDAL (>= 2.2.3)", &distribution, &release);
         assert!(
-            gdal.iter().any(|p| p == "gdal-devel"),
+            gdal.packages.iter().any(|p| p == "gdal-devel"),
             "expected gdal-devel for rhel-8.10, got {gdal:?}"
         );
     }
@@ -801,12 +819,15 @@ mod tests {
         // trade a spurious warning for wrong package names.
         assert!(
             sysreqs_rules::resolve_local("leptonica", "rockylinux", "8")
+                .packages
                 .iter()
                 .any(|p| p == "leptonica-devel"),
             "rockylinux 8 carries leptonica-devel"
         );
         assert!(
-            sysreqs_rules::resolve_local("leptonica", "redhat", "8").is_empty(),
+            sysreqs_rules::resolve_local("leptonica", "redhat", "8")
+                .packages
+                .is_empty(),
             "redhat 8 does not — aliasing the local lookup would lose it"
         );
         // Both halves of the libarchive divergence, so the test actually
@@ -815,12 +836,13 @@ mod tests {
         // configure with nothing pointing at the cause.
         assert!(
             sysreqs_rules::resolve_local("libarchive", "centos", "8")
+                .packages
                 .iter()
                 .any(|p| p == "libarchive-devel"),
             "centos 8 wants the -devel package"
         );
         assert_eq!(
-            sysreqs_rules::resolve_local("libarchive", "redhat", "8"),
+            sysreqs_rules::resolve_local("libarchive", "redhat", "8").packages,
             vec!["libarchive".to_string()],
             "redhat 8 names the runtime package, not the headers"
         );
@@ -916,7 +938,7 @@ mod tests {
         // apk-compatible package name. This is the invariant issue #30 needs.
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.9.0)", "alpine", "3.21");
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-dev"),
+            pkgs.packages.iter().any(|p| p == "libxml2-dev"),
             "expected libxml2-dev in fallback output, got {pkgs:?}"
         );
     }
