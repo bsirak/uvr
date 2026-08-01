@@ -242,9 +242,9 @@ pub struct SysReqsCheck {
     /// rules still ran, so `missing` may well be authoritative. Read this
     /// together with `local_resolved` before claiming the check was skipped.
     pub unsupported_distro: bool,
-    /// Set when at least one API lookup failed outright (network/HTTP/parse,
-    /// #148). Affected packages were checked against the vendored local
-    /// rules instead.
+    /// Set when the single batched index fetch failed outright
+    /// (network/HTTP/parse, #148). Every package was checked against the
+    /// vendored local rules instead.
     pub lookup_failed: bool,
     /// Number of packages the vendored local rules resolved to at least one
     /// system package. Distinguishes "the fallback ran and found nothing
@@ -263,9 +263,10 @@ pub struct PackageSysReqQuery {
     /// the vendored `r-system-requirements` rules locally.
     pub system_requirements: Option<String>,
     /// True for Bioconductor-sourced packages. The Posit sysreqs API only
-    /// covers CRAN and returns HTTP 500 for Bioc names, so querying it is a
-    /// guaranteed per-package WARN with zero information (#202) — Bioc
-    /// packages go straight to the vendored local rules instead.
+    /// covers CRAN and returns HTTP 500 for Bioc names, so looking one up in
+    /// the fetched index would be a guaranteed non-match with zero
+    /// information (#202) — Bioc packages go straight to the vendored local
+    /// rules instead.
     pub bioc: bool,
 }
 
@@ -321,11 +322,29 @@ pub async fn check_system_deps(
         None
     };
 
+    apply_index(&mut out, packages, index.as_ref(), distro);
+
+    out
+}
+
+/// Decide, per package, whether to use the fetched index or the vendored
+/// local rules, and record the outcome.
+///
+/// Synchronous and free of I/O beyond `filter_missing`'s package-manager
+/// queries, so it can be exercised directly with a hand-built `index`
+/// instead of requiring network access — that is the whole reason this is
+/// split out of `check_system_deps`.
+fn apply_index(
+    out: &mut SysReqsCheck,
+    packages: &[PackageSysReqQuery],
+    index: Option<&HashMap<String, Vec<SysReq>>>,
+    distro: &str,
+) {
     for pkg in packages {
         // The Posit API is CRAN-only; Bioc names are absent from its index,
         // so check them against the vendored local rules directly (#202).
-        let Some(index) = index.as_ref().filter(|_| !pkg.bioc) else {
-            check_pkg_local(&mut out, pkg, distro);
+        let Some(index) = index.filter(|_| !pkg.bioc) else {
+            check_pkg_local(out, pkg, distro);
             continue;
         };
         let Some(resolved) = index.get(&pkg.name) else {
@@ -339,14 +358,12 @@ pub async fn check_system_deps(
                 .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
         }
     }
-
-    out
 }
 
 /// Check one package's `SystemRequirements` against the vendored
 /// `r-system-requirements` rules and record any missing system packages.
-/// Shared by the unsupported-distro tail fallback and the per-package
-/// API-failure fallback (#148).
+/// Shared by the unsupported-distro / lookup-failed fallback in
+/// `apply_index` and the direct Bioc bypass in the same function.
 fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &str) {
     let (distribution, version) = distro.split_once('-').unwrap_or((distro, ""));
     let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
@@ -625,6 +642,118 @@ mod tests {
         };
         check_pkg_local(&mut out, &pkg, "alpine-3.23.5");
         assert_eq!(out.local_resolved, 0);
+    }
+
+    #[test]
+    fn no_index_falls_back_to_local_rules_for_every_package() {
+        // The unsupported-distro / lookup-failed case: `apply_index` gets
+        // `index = None` and must run every package through the vendored
+        // local rules rather than skipping them. Assert on `local_resolved`,
+        // not `missing` — the counter is incremented before `filter_missing`
+        // runs, so it holds regardless of what is installed on the test
+        // host (the Alpine bug this whole check exists to catch).
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "xml2".to_string(),
+            system_requirements: Some(
+                "libxml2: libxml2-dev (deb), libxml2-devel (rpm)".to_string(),
+            ),
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, None, "alpine-3.23.5");
+        assert_eq!(
+            out.local_resolved, 1,
+            "with no index, xml2 must be resolved via the local rules"
+        );
+    }
+
+    #[test]
+    fn a_package_present_in_the_index_is_not_also_checked_locally() {
+        // The common, covered-distro case: when the index has an entry, it
+        // is authoritative and the local rules must NOT run — even though
+        // `system_requirements` here would resolve locally too, proving the
+        // index path was actually taken instead of the fallback.
+        let mut index = HashMap::new();
+        index.insert(
+            "curl".to_string(),
+            vec![SysReq {
+                package: "libcurl4-openssl-dev".to_string(),
+            }],
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "curl".to_string(),
+            system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        assert_eq!(
+            out.local_resolved, 0,
+            "curl is in the index, so the local rules must be bypassed entirely"
+        );
+    }
+
+    #[test]
+    fn a_package_absent_from_the_index_is_skipped_not_faulted() {
+        // Absence from the index means "declares no system requirements",
+        // per `parse_sysreqs_index`'s own contract — not an error, and not
+        // a reason to fall back to local rules for that package.
+        let mut index = HashMap::new();
+        index.insert(
+            "curl".to_string(),
+            vec![SysReq {
+                package: "libcurl4-openssl-dev".to_string(),
+            }],
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "jsonlite".to_string(),
+            system_requirements: None,
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        assert!(
+            out.missing.is_empty(),
+            "a package absent from the index must not produce a missing entry"
+        );
+        assert_eq!(
+            out.local_resolved, 0,
+            "a package absent from the index must not fall back to local rules"
+        );
+    }
+
+    #[test]
+    fn mixed_bioc_and_cran_packages_split_between_index_and_local_rules() {
+        // The subtle case the `.filter(|_| !pkg.bioc)` line encodes: in a
+        // single sync with a fetched index, the Bioc package must still go
+        // to the local rules while the CRAN package alongside it uses the
+        // index, even though both apply_index calls share the same `Some`
+        // index.
+        let mut index = HashMap::new();
+        index.insert(
+            "curl".to_string(),
+            vec![SysReq {
+                package: "libcurl4-openssl-dev".to_string(),
+            }],
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![
+            PackageSysReqQuery {
+                name: "Rhtslib".to_string(),
+                system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
+                bioc: true,
+            },
+            PackageSysReqQuery {
+                name: "curl".to_string(),
+                system_requirements: Some("libxml2 (>= 2.6.3)".to_string()),
+                bioc: false,
+            },
+        ];
+        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        assert_eq!(
+            out.local_resolved, 1,
+            "only the Bioc package (Rhtslib) should have gone through the local rules"
+        );
     }
 
     #[test]
