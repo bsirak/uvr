@@ -116,24 +116,100 @@ fn linux_portable_id() -> &'static str {
     }
 }
 
-/// True when the host uses musl libc — detected from `/etc/os-release`
-/// (`ID=alpine`) or the presence of a musl dynamic loader under `/lib`.
+/// True when the host runs musl libc.
+///
+/// Four signals, gathered here and weighed in [`musl_from_signals`]: Alpine's
+/// two self-identifications (`/etc/alpine-release`, `ID=alpine`), what `ldd
+/// --version` reports, and which dynamic loaders exist under `/lib` and
+/// `/lib64`.
 fn linux_is_musl() -> bool {
-    if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
-        for line in content.lines() {
-            if let Some(val) = line.strip_prefix("ID=") {
-                if val.trim_matches('"').eq_ignore_ascii_case("alpine") {
-                    return true;
-                }
-            }
+    musl_from_signals(
+        alpine_marker_present(),
+        ldd_version_output().as_deref(),
+        loader_present("ld-linux-"),
+        loader_present("ld-musl-"),
+    )
+}
+
+/// Decide the host libc from independent signals, strongest first.
+///
+/// The signal that used to decide this alone — "a musl loader file exists" —
+/// says only that musl is *installed*, not that the host runs it. Any glibc
+/// machine with the `musl` package (a Rust `x86_64-unknown-linux-musl` target
+/// pulls it in, so this is common on developer boxes) claimed to be musl and
+/// was handed musllinux R builds, which then fail to start:
+///
+/// ```text
+/// Error relocating /lib/libz.so.1: __snprintf_chk: symbol not found
+/// ```
+///
+/// `ldd --version` is asked first because that is what `install.sh` asks when
+/// it chooses which uvr binary to hand the same host — two detectors that
+/// disagree about one machine is the shape of #175 and #209, and worth not
+/// repeating. The loader scan survives as a fallback for hosts without `ldd`,
+/// but glibc now wins a tie: a box with both loaders runs glibc.
+fn musl_from_signals(
+    alpine: bool,
+    ldd: Option<&str>,
+    glibc_loader: bool,
+    musl_loader: bool,
+) -> bool {
+    if alpine {
+        return true;
+    }
+    if let Some(out) = ldd {
+        let out = out.to_ascii_lowercase();
+        if out.contains("musl") {
+            return true;
+        }
+        if out.contains("gnu libc") || out.contains("glibc") {
+            return false;
         }
     }
-    std::fs::read_dir("/lib")
-        .map(|rd| {
-            rd.flatten()
-                .any(|e| e.file_name().to_string_lossy().starts_with("ld-musl-"))
+    if glibc_loader {
+        return false;
+    }
+    musl_loader
+}
+
+/// Alpine identifies itself twice; either is conclusive and neither costs a
+/// subprocess.
+fn alpine_marker_present() -> bool {
+    if std::path::Path::new("/etc/alpine-release").exists() {
+        return true;
+    }
+    std::fs::read_to_string("/etc/os-release")
+        .map(|content| {
+            content.lines().any(|line| {
+                line.strip_prefix("ID=")
+                    .is_some_and(|v| v.trim_matches('"').eq_ignore_ascii_case("alpine"))
+            })
         })
         .unwrap_or(false)
+}
+
+/// `ldd --version`, merging stderr: musl's ldd writes its banner there and
+/// exits non-zero, so both the status and the stream have to be ignored.
+fn ldd_version_output() -> Option<String> {
+    let out = std::process::Command::new("ldd")
+        .arg("--version")
+        .output()
+        .ok()?;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Whether any dynamic loader whose name starts with `prefix` is installed.
+fn loader_present(prefix: &str) -> bool {
+    ["/lib", "/lib64"].iter().any(|dir| {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Parse the host glibc version from `getconf GNU_LIBC_VERSION` (e.g. "glibc 2.39").
@@ -515,7 +591,7 @@ pub async fn download_and_install_r(
         // circuiting. The previous existence-only check let half-patched
         // installs (e.g. mvuorre's #99 on macOS 26.x) sit forever
         // because `uvr r install` skipped the reinstall, and downstream
-        // checks treated `R --version`-returns-nothing as "not
+        // checks treated a version probe returning nothing as "not
         // installed" and looped the user back here. Now: if `R
         // --version` succeeds we trust it; if it fails we nuke the dir
         // and reinstall fresh.
@@ -590,7 +666,7 @@ pub async fn download_and_install_r(
     // tree into place with one atomic rename — install_dir must not pre-exist.
     install_r_portable(archive.path(), &install_dir, platform)?;
     // Extraction is done with it — release the ~200 MB now rather than at the
-    // end of the function, which still has an `R --version` probe to run.
+    // end of the function, which still has a version probe to run.
     drop(archive);
 
     if !r_binary.exists() {
@@ -613,6 +689,32 @@ pub async fn download_and_install_r(
             "Could not configure the OpenMP runtime for R {version}: {e}. \
              Binary packages built with OpenMP (Rtsne, mgcv, ...) may fail to load."
         ),
+    }
+
+    // Run it. Until now this function proved only that `bin/R` *exists*, so an
+    // R that cannot start — wrong libc, truncated download, missing system
+    // library — was reported as a successful install and only surfaced later
+    // as a confusing failure somewhere else. The already-installed path above
+    // has always probed the binary through `query_r_version`; a fresh install
+    // had no such check, which is exactly the case where a bad libc guess
+    // lands.
+    //
+    // Not on Windows. There `bin/R.exe` is a front-end that re-spawns
+    // `bin\<arch>\R.exe` through msvcrt's `system()`, and the probe comes back
+    // empty for a freshly unzipped install even though the R it launches is
+    // fine: CI watched this delete a working R 4.1.0 and call it a failed
+    // install. Whatever the probe loses in that hand-off, gating on it here
+    // trades a real bug for a hypothetical one — the failure this check exists
+    // for is a libc mismatch, and Windows has no libc question and one build
+    // per release. (`query_r_version` being unusable against a *managed*
+    // Windows R is a pre-existing bug in its own right — the exists-path above
+    // hits it too — but not one to fix blind from a Linux box.)
+    if !platform.is_windows() {
+        verify_r_runs(&r_binary).inspect_err(|_| {
+            // Leave nothing behind that the exists-only short-circuit would
+            // treat as installed on the next run.
+            let _ = std::fs::remove_dir_all(&install_dir);
+        })?;
     }
 
     info!("R {version} installed to {}", install_dir.display());
@@ -706,6 +808,33 @@ fn is_real_r_version(s: &str) -> bool {
     parts
         .iter()
         .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Confirm a freshly installed R actually runs.
+///
+/// Starting R and asking it for its own version — [`query_r_version`] runs
+/// `R --vanilla --slave -e "cat(R.version...)"` — is the cheapest end-to-end
+/// proof that the build matches the host: it exercises the dynamic loader, the
+/// bundled libraries and R's own startup. The common failure it catches is a
+/// libc mismatch, so the message names that first: a musllinux build on glibc
+/// dies in the loader with something like `symbol not found`, which means
+/// nothing on its own.
+///
+/// Callers run this on Unix only — see the call site in
+/// [`download_and_install_r`] for why Windows is left out.
+///
+/// [`query_r_version`]: crate::r_version::detector::query_r_version
+fn verify_r_runs(r_binary: &Path) -> Result<()> {
+    if crate::r_version::detector::query_r_version(r_binary).is_some() {
+        return Ok(());
+    }
+    Err(UvrError::Other(format!(
+        "The R build installed at {} does not run on this host — starting it and \
+         asking for its version produced nothing. This usually means the build \
+         does not match the host's libc or architecture. Report it with the \
+         output of `uvr doctor`.",
+        r_binary.display()
+    )))
 }
 
 /// Locate the directory containing `bin/R` (or `bin/R.exe` on Windows) within an
@@ -1089,6 +1218,82 @@ mod tests {
         assert!(portable_min_r_version(Platform::WindowsX86_64).is_some());
         assert!(portable_min_r_version(Platform::LinuxX86_64).is_none());
         assert!(portable_min_r_version(Platform::LinuxArm64).is_none());
+    }
+
+    #[test]
+    fn a_musl_loader_on_a_glibc_host_is_not_a_musl_host() {
+        // The regression. Installing Rust's x86_64-unknown-linux-musl target
+        // pulls in /lib/ld-musl-x86_64.so.1 on an ordinary glibc box; the old
+        // check saw that file and handed the host musllinux R builds, which
+        // fail in the loader on first run.
+        assert!(!musl_from_signals(
+            false,
+            Some("ldd (GNU libc) 2.44"),
+            true,
+            true
+        ));
+        // Even with no ldd to ask, glibc wins the tie.
+        assert!(!musl_from_signals(false, None, true, true));
+    }
+
+    #[test]
+    fn a_real_musl_host_is_still_musl() {
+        // Alpine, by either marker.
+        assert!(musl_from_signals(true, None, false, false));
+        // A musl distro that is not Alpine: ldd says so.
+        assert!(musl_from_signals(
+            false,
+            Some("musl libc (x86_64)\nVersion 1.2.5"),
+            false,
+            true
+        ));
+        // No ldd at all, only a musl loader.
+        assert!(musl_from_signals(false, None, false, true));
+    }
+
+    #[test]
+    fn an_ordinary_glibc_host_is_not_musl() {
+        assert!(!musl_from_signals(
+            false,
+            Some("ldd (GNU libc) 2.39"),
+            true,
+            false
+        ));
+        // Nothing conclusive anywhere: assume glibc, which is what every
+        // mainstream distro is. Guessing musl would send them a build that
+        // cannot start; guessing glibc at worst sends a build that is checked
+        // by verify_r_runs.
+        assert!(!musl_from_signals(false, None, false, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_r_runs_rejects_an_r_that_cannot_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+
+        // A build that runs and reports a version.
+        let good = dir.path().join("R-good");
+        // query_r_version asks R to print `major.minor` and reads the last
+        // version-shaped line, so that is what the stand-in prints.
+        std::fs::write(&good, "#!/bin/sh\necho 4.5.1\n").unwrap();
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(verify_r_runs(&good).is_ok());
+
+        // A build that dies in the loader, as a musllinux R does on glibc.
+        let bad = dir.path().join("R-bad");
+        std::fs::write(
+            &bad,
+            "#!/bin/sh\necho 'Error relocating /lib/libz.so.1: symbol not found' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = verify_r_runs(&bad).unwrap_err().to_string();
+        assert!(err.contains("does not run on this host"), "got {err}");
+        assert!(
+            err.contains("libc"),
+            "the message must name the likely cause: {err}"
+        );
     }
 
     #[test]
