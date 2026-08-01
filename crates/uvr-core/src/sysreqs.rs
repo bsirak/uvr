@@ -110,15 +110,17 @@ struct PpmRequirementDetail {
 ///
 /// Packages absent from the map declare no system requirements — the API
 /// only lists those that do.
-fn parse_sysreqs_index(body: &str) -> HashMap<String, Vec<SysReq>> {
+///
+/// Fallible on purpose: an infallible version that swallowed the parse error
+/// into an empty map would make a malformed 200 response look identical to
+/// "no package on this distro needs anything", silently and on every distro.
+/// The per-package path this replaces mapped a parse failure to
+/// `LookupFailed`; keep that.
+fn parse_sysreqs_index(
+    body: &str,
+) -> std::result::Result<HashMap<String, Vec<SysReq>>, serde_json::Error> {
     let mut index: HashMap<String, Vec<SysReq>> = HashMap::new();
-    let response: PpmSysreqsResponse = match serde_json::from_str(body) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("Failed to parse Posit sysreqs index: {e}");
-            return index;
-        }
-    };
+    let response: PpmSysreqsResponse = serde_json::from_str(body)?;
     for req in response.requirements {
         if req.name.is_empty() {
             continue;
@@ -130,7 +132,7 @@ fn parse_sysreqs_index(body: &str) -> HashMap<String, Vec<SysReq>> {
             }
         }
     }
-    index
+    Ok(index)
 }
 
 /// Outcome of a sysreqs API lookup.
@@ -279,7 +281,13 @@ async fn fetch_sysreqs_index(client: &reqwest::Client, distro: &str) -> SysReqIn
         return SysReqIndex::LookupFailed;
     }
 
-    SysReqIndex::Supported(parse_sysreqs_index(&body))
+    match parse_sysreqs_index(&body) {
+        Ok(index) => SysReqIndex::Supported(index),
+        Err(e) => {
+            warn!("Failed to parse Posit sysreqs index: {e}");
+            SysReqIndex::LookupFailed
+        }
+    }
 }
 
 /// Check which packages are missing on the system.
@@ -714,7 +722,7 @@ mod tests {
             {"name":"ABC.RAP","requirements":{"packages":["make"]}},
             {"name":"curl","requirements":{"packages":["libcurl4-openssl-dev","libssl-dev"]}}
         ]}"#;
-        let index = parse_sysreqs_index(body);
+        let index = parse_sysreqs_index(body).unwrap();
         assert_eq!(index.len(), 2);
         let curl: Vec<&str> = index["curl"].iter().map(|r| r.package.as_str()).collect();
         assert_eq!(curl, vec!["libcurl4-openssl-dev", "libssl-dev"]);
@@ -726,7 +734,7 @@ mod tests {
         // "needs nothing", not an error.
         let body =
             r#"{"requirements":[{"name":"curl","requirements":{"packages":["libssl-dev"]}}]}"#;
-        let index = parse_sysreqs_index(body);
+        let index = parse_sysreqs_index(body).unwrap();
         assert!(!index.contains_key("jsonlite"));
     }
 
@@ -734,8 +742,18 @@ mod tests {
     fn empty_package_names_are_skipped() {
         let body =
             r#"{"requirements":[{"name":"x","requirements":{"packages":["","libssl-dev"]}}]}"#;
-        let index = parse_sysreqs_index(body);
+        let index = parse_sysreqs_index(body).unwrap();
         let x: Vec<&str> = index["x"].iter().map(|r| r.package.as_str()).collect();
         assert_eq!(x, vec!["libssl-dev"]);
+    }
+
+    #[test]
+    fn malformed_index_body_is_an_error_not_an_empty_map() {
+        // A malformed or truncated 200 response must not be silently treated
+        // as "no package on this distro needs anything" — that would be
+        // indistinguishable from a genuinely empty, well-formed index. This
+        // is what routes `fetch_sysreqs_index` to `LookupFailed` instead of
+        // `Supported(HashMap::new())` on a broken body.
+        assert!(parse_sysreqs_index("{not json").is_err());
     }
 }
