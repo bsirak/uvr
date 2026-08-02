@@ -144,21 +144,44 @@ pub fn is_known(distros: &[Distro], distribution: &str, release: &str) -> bool {
     })
 }
 
+/// Whether a parse produced a catalog worth trusting.
+///
+/// Every field is `#[serde(default)]`, so an upstream *rename* parses cleanly
+/// and silently yields the default. That is the dangerous direction: if `arch`
+/// (or `os`, or `binaries`) stopped arriving under the name we expect,
+/// [`Distro::serves`] would be false for every entry while [`is_known`] still
+/// reported pairs as known — and `live_linux_repo` reads known-but-not-serving
+/// as an authoritative "Posit publishes nothing here", sending every distro to
+/// source builds. A whole-envelope failure degrades correctly to the static
+/// table; this is the partial failure that does not.
+///
+/// A catalog in which *nothing* serves binaries anywhere is a parse that lost
+/// a field, not a Posit that stopped building. Treat it as unreachable so the
+/// table answers, exactly as if the endpoint were down.
+fn usable(distros: &[Distro]) -> bool {
+    distros
+        .iter()
+        .any(|d| d.os == "linux" && d.binaries && !d.arch.is_empty() && !d.binary_url.is_empty())
+}
+
 /// Fetch the platform catalog, cached for the day alongside the package
 /// indexes.
 ///
-/// Returns `None` on any failure — unreachable, non-success, unparseable.
-/// Callers fall back to the static table rather than losing binaries because
-/// a status endpoint was down.
+/// Returns `None` on any failure — unreachable, non-success, unparseable, or
+/// parsed-but-unusable (see [`usable`]). Callers fall back to the static table
+/// rather than losing binaries because a status endpoint was down.
 pub async fn fetch(client: &reqwest::Client) -> Option<Vec<Distro>> {
     let cache = cache_path();
 
     if let Ok(cached) = std::fs::read_to_string(&cache) {
-        if let Ok(status) = serde_json::from_str::<Status>(&cached) {
-            return Some(status.distros);
+        match serde_json::from_str::<Status>(&cached) {
+            Ok(status) if usable(&status.distros) => return Some(status.distros),
+            // A corrupt or unusable cache file should cost one refetch, not
+            // the whole feature.
+            _ => {
+                let _ = std::fs::remove_file(&cache);
+            }
         }
-        // A corrupt cache file should cost one refetch, not the whole feature.
-        let _ = std::fs::remove_file(&cache);
     }
 
     debug!("Fetching P3M platform catalog from {STATUS_URL}");
@@ -183,7 +206,8 @@ pub async fn fetch(client: &reqwest::Client) -> Option<Vec<Distro>> {
             return None;
         }
     };
-    if status.distros.is_empty() {
+    if !usable(&status.distros) {
+        debug!("P3M status endpoint returned no usable entries; using the static table");
         return None;
     }
 
@@ -303,5 +327,39 @@ mod tests {
     fn posit_spells_aarch64_as_arm64() {
         assert_eq!(posit_arch("aarch64"), "arm64");
         assert_eq!(posit_arch("x86_64"), "x86_64");
+    }
+
+    #[test]
+    fn a_partial_field_rename_reads_as_unreachable_not_as_a_refusal() {
+        // Every field is #[serde(default)], so renaming one upstream parses
+        // cleanly and defaults it. The failure that matters is the one that
+        // does *not* look like a failure: `arch` arriving under another name
+        // makes `serves()` false everywhere, while `is_known()` still reports
+        // the pair as known — which `live_linux_repo` treats as "Posit
+        // publishes nothing for this host" and answers with source builds.
+        // `usable()` is what tells the two apart.
+        let renamed = SAMPLE.replace("\"arch\"", "\"architectures\"");
+        let distros = serde_json::from_str::<Status>(&renamed).unwrap().distros;
+        assert!(!distros.is_empty(), "it still parses — that is the problem");
+        assert!(is_known(&distros, "ubuntu", "22.04"), "still 'known'");
+        assert_eq!(
+            codename_for(&distros, "ubuntu", "22.04", "x86_64"),
+            None,
+            "and nothing serves, which alone would look like an authoritative no"
+        );
+        assert!(
+            !usable(&distros),
+            "so the catalog must be declared unusable"
+        );
+
+        // Same shape for the other two fields a lookup depends on.
+        for field in ["\"os\"", "\"binaries\"", "\"binaryURL\""] {
+            let mangled = SAMPLE.replace(field, "\"renamed_upstream\"");
+            let distros = serde_json::from_str::<Status>(&mangled).unwrap().distros;
+            assert!(!usable(&distros), "{field} rename must read as unusable");
+        }
+
+        // The real thing is of course fine.
+        assert!(usable(&sample()));
     }
 }

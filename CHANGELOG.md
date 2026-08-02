@@ -18,8 +18,6 @@ Pure tracking section — fixes and small features land here between tags.
   tarballs are downloaded and reads `SystemRequirements` from each one's
   DESCRIPTION, which is where the field is actually published.
 
-
-
 - Binary package repos are chosen from Posit's live platform catalog, and the
   choice now accounts for the host architecture. uvr matched a hardcoded
   slug → repo table with no notion of arch, but only `rhel9`, `rhel10`,

@@ -343,6 +343,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check every mapped repo still serves
         run: cargo test -p uvr-core --test p3m_repos_live -- --ignored --nocapture
+      # The catalog is what answers at runtime; the table is only the offline
+      # answer. A stale table is invisible until someone is offline, so the
+      # comparison has to run somewhere that is online on a schedule.
+      - name: Check the table still agrees with Posit's platform catalog
+        run: cargo test -p uvr-core --test p3m_status_live -- --ignored --nocapture
 
   audit:
     name: Security audit
