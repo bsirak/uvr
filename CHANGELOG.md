@@ -44,6 +44,27 @@ Pure tracking section — fixes and small features land here between tags.
   interchangeable there: `rockylinux` 8 carries `leptonica-devel` where
   `redhat` 8 carries nothing, and `centos` 8 wants `libarchive-devel` where
   `redhat` 8 says `libarchive`.
+
+- Glibc hosts with musl installed get glibc R builds again. `linux_is_musl()`
+  answered yes whenever a musl dynamic loader existed anywhere under `/lib`,
+  which is true of any glibc machine that has the `musl` package — installing
+  Rust's `x86_64-unknown-linux-musl` target pulls it in, so this hit developer
+  boxes routinely. Those hosts were handed musllinux R, which dies in the
+  loader (`Error relocating /lib/libz.so.1: __snprintf_chk: symbol not found`),
+  and were also denied P3M binary packages entirely, since that path skips musl
+  hosts. Detection now asks `ldd --version` first — the same question
+  `install.sh` asks when it picks which uvr binary the host gets — and glibc
+  wins when both loaders are present.
+
+- A freshly installed R is checked before being called installed. The install
+  verified that `bin/R` exists but never ran it, so an R that could not start
+  was reported as a success and failed later somewhere less obvious. On macOS
+  and Linux `uvr r install` now starts the new R and asks it for its version,
+  then removes the install and says what likely went wrong if that produces
+  nothing. Windows is exempt: `bin/R.exe` there is a front-end that re-spawns
+  the real binary, and the probe returns nothing for a freshly unzipped
+  install that runs perfectly well.
+
 - System dependencies are resolved on RHEL and its rebuilds (#209). uvr asked
   both sysreqs catalogs under the raw `/etc/os-release` identity, which neither
   speaks: Posit's API answers `Unsupported system` for `rhel`/`8.10` but
