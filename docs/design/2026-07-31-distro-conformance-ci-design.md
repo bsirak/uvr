@@ -177,10 +177,36 @@ Stages, in order:
    which is what a user hits seconds after running `install.sh`.
 3. **r** — install R and list it. Exercises the portable-build download, extract and
    `R --version` validation on this distro's libc.
-4. **binary** — install and `library()` the smoke package. #175: a binary from the
+
+   Three entries — `rhel-8`, `ubuntu-2004`, `debian-11` — sit below the portable
+   builds' glibc 2.34 floor and *cannot* pass this stage. They carry an `expect`
+   block naming the stage and the substring uvr must print:
+
+   ```json
+   "expect": { "stage": "r", "message": "is too old for portable R builds" }
+   ```
+
+   The stage then asserts the refusal instead of dying on it, and stops — nothing
+   downstream can run without R. Asserting rather than skipping is the point: a
+   skipped stage hides the limitation, and a permanently-red job nobody reads is how
+   a real failure hides. This way the lane is green, the limitation stays visible,
+   and it turns red in *both* directions — if uvr stops refusing (the floor moved,
+   update the matrix) or refuses for some other reason (#212's message regressed
+   into something a user can't act on).
+4. **binary** — install and `library()` `BINARY_PKG`. #175: a binary from the
    wrong distro's repo installs happily and only fails at load, so the assertion has
    to load it. With no compiler present, an install that quietly falls back to a
    source build fails here rather than passing for the wrong reason.
+
+   `BINARY_PKG` is `jsonlite`, deliberately *not* the `SYSREQS_PKG` this stage used
+   to share. The subject here is repo **selection**, and P3M's Linux `PACKAGES`
+   index lists every package whether or not a binary was built — the binary-vs-source
+   choice happens at download time from the R User-Agent. So a recently released
+   version can be indexed everywhere and built only for the busiest repos, which
+   made this stage depend on Posit's build queue rather than on anything uvr or the
+   distro does. xml2 1.6.0 (released 2026-06-22) is the live example: a `jammy`
+   binary, and *source* on `opensuse156`, `bookworm`, `bullseye`, `focal` and
+   `centos7`. jsonlite is built for every repo in the matrix.
 5. **sysreqs** — the #209 regression test at the real end of the chain. Installs a
    compiler first, since this is the stage that needs one:
 
@@ -285,10 +311,27 @@ Bugs this design surfaced before any of it ran in CI, and where each landed:
 | Alpine resolves no sysreqs at all — CRAN's `PACKAGES` carries no `SystemRequirements` | #208, closing #207 — re-verified green |
 | R's `utils` calls `system(which ...)` in `.onLoad` and won't load without `which` | prerequisite here; `uvr doctor` could say so |
 | `curl` is a package *conflict* on RHEL images shipping `curl-minimal` | requested by command, not package |
+| uvr tells a zypper host to run `apt-get install -y libxml2-devel` — the same unconditional final branch as the row above, but reaching the user as an instruction that cannot work | open, needs its own issue |
+| `uvr add` **fails outright** when P3M serves source where the index promised a binary: the Linux `PACKAGES` index lists every package regardless of build coverage, so uvr announces "3 binary" and then rejects the download | open, needs its own issue |
 
 The first four are why this document's own matrix data had to be rewritten before
 merge: a matrix that describes gaps as open after they are closed is worse than no
 matrix, because it reads as authority.
+
+The last two are what the openSUSE lane found once the `DIST` path fix let it run past
+the first `$UVR` call. The second is the more serious: it is not openSUSE-specific and
+not a repo-selection miss. P3M decides binary-vs-source at *download* time from the R
+User-Agent, and its per-package build coverage lags for the quieter repos — so any
+host whose repo has not been built for a given package version gets a hard error
+instead of the source build it should fall back to. Verified against the live service:
+
+```
+xml2 1.6.0 (2026-06-22)   jammy=BINARY   opensuse156=source   bookworm=source
+jsonlite 2.0.0            jammy=BINARY   opensuse156=BINARY   bookworm=BINARY
+```
+
+That is why the binary stage moved to `jsonlite`: gating the suite on xml2 measured
+Posit's build queue, not uvr.
 
 ## What this deliberately does not do
 

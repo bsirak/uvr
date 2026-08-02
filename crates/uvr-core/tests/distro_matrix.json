@@ -36,7 +36,11 @@
         "api": true,
         "local": true
       },
-      "note": "Expected to fail at `uvr r install`: the portable R builds need glibc 2.34 and uvr says so explicitly. #212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error."
+      "note": "#212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error. The portable R builds need glibc 2.34; this distro is below that floor, so the `expect` block above asserts uvr refuses with the #212 message rather than leaving the job permanently red.",
+      "expect": {
+        "stage": "r",
+        "message": "is too old for portable R builds"
+      }
     },
     {
       "key": "ubuntu-2204",
@@ -94,7 +98,11 @@
         "api": true,
         "local": true
       },
-      "note": "Expected to fail at `uvr r install`: the portable R builds need glibc 2.34 and uvr says so explicitly. #212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error."
+      "note": "#212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error. The portable R builds need glibc 2.34; this distro is below that floor, so the `expect` block above asserts uvr refuses with the #212 message rather than leaving the job permanently red.",
+      "expect": {
+        "stage": "r",
+        "message": "is too old for portable R builds"
+      }
     },
     {
       "key": "debian-12",
@@ -138,7 +146,7 @@
       "key": "rhel-8",
       "image": "registry.access.redhat.com/ubi8:latest",
       "lane": "pr",
-      "note": "The #209 image. UBI is the only RHEL testable without a subscription; it reports the same ID/VERSION_ID as subscribed RHEL, which is the axis under test. Expected to fail at `uvr r install`: the portable R builds need glibc 2.34 and uvr says so explicitly. #212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error.",
+      "note": "The #209 image. UBI is the only RHEL testable without a subscription; it reports the same ID/VERSION_ID as subscribed RHEL, which is the axis under test. #212 is what lets the CLI start here at all, so the failure is now a clear message instead of a linker error. The portable R builds need glibc 2.34; this distro is below that floor, so the `expect` block above asserts uvr refuses with the #212 message rather than leaving the job permanently red.",
       "os_release": {
         "id": "rhel",
         "version_id": "8.10"
@@ -152,6 +160,10 @@
         "release": "8",
         "api": true,
         "local": true
+      },
+      "expect": {
+        "stage": "r",
+        "message": "is too old for portable R builds"
       }
     },
     {

@@ -18,16 +18,39 @@
 # or a musl binary picked on a glibc host.
 #
 # Env:
-#   DIST         directory of release builds (default: ./dist)
-#   R_VERSIONS   space-separated R versions to install (default: 4.5.1)
-#   SMOKE_PKG    package with an external system library (default: xml2)
-#   SKIP_STAGES  space-separated stage names to skip (default: none)
+#   DIST                 directory of release builds (default: ./dist)
+#   R_VERSIONS           space-separated R versions to install (default: 4.5.1)
+#   BINARY_PKG           package for the binary stage (default: jsonlite)
+#   SYSREQS_PKG          package with an external system library (default: xml2)
+#   SKIP_STAGES          space-separated stage names to skip (default: none)
+#   EXPECT_FAIL_STAGE    stage the matrix records as unsupported here
+#   EXPECT_FAIL_MESSAGE  substring uvr must print when it refuses
 set -eu
 
 DIST="${DIST:-./dist}"
 R_VERSIONS="${R_VERSIONS:-4.5.1}"
-SMOKE_PKG="${SMOKE_PKG:-xml2}"
+# Two packages, because the two stages ask different questions and only one of
+# them is about system libraries.
+#
+# The binary stage asks "did uvr pick a repo whose binaries run here", so it
+# needs a package P3M builds for every repo. The sysreqs stage asks "did uvr
+# resolve this distro's *devel* package", so it needs one with an external
+# system library whose headers the image deliberately lacks.
+#
+# Sharing one package made the binary stage depend on Posit's per-package build
+# queue, which is not a property of the distro and not something uvr controls:
+# P3M's Linux `PACKAGES` index lists every package whether or not a binary
+# exists, and the binary-vs-source choice is made at download time from the R
+# User-Agent. A recently released version can therefore be indexed everywhere
+# and built only for the busiest repos — xml2 1.6.0 (2026-06-22) has a jammy
+# binary and serves *source* on opensuse156, bookworm, bullseye, focal and
+# centos7. jsonlite is what ci.yml already uses for this: small, compiled
+# component, and built for every repo in the matrix.
+BINARY_PKG="${BINARY_PKG:-jsonlite}"
+SYSREQS_PKG="${SYSREQS_PKG:-xml2}"
 SKIP_STAGES="${SKIP_STAGES:-}"
+EXPECT_FAIL_STAGE="${EXPECT_FAIL_STAGE:-}"
+EXPECT_FAIL_MESSAGE="${EXPECT_FAIL_MESSAGE:-}"
 R_LATEST="${R_VERSIONS##* }"
 # Where the tree is mounted; stages cd into scratch projects and back.
 ROOT="$(pwd)"
@@ -55,6 +78,14 @@ skipped() {
     done
     return 1
 }
+
+# A stage the matrix records as unsupported on this distro. The expectation is
+# asserted rather than skipped: skipping hides a limitation, asserting keeps it
+# visible *and* checked, so the lane turns red if uvr stops refusing, or starts
+# refusing for a different reason. A permanently-red job nobody reads is how a
+# real failure hides, and a silently-skipped one is how a fixed limitation goes
+# unnoticed.
+expect_fail() { [ "$EXPECT_FAIL_STAGE" = "$1" ]; }
 
 # --------------------------------------------------------- distro plumbing ---
 
@@ -101,7 +132,8 @@ pm_refresh() {
 #                                  .onLoad and fails to load without it; the
 #                                  minimal RPM images ship no `which`, Debian
 #                                  and busybox do
-#   libxml2 runtime                load the binary SMOKE_PKG
+#   libxml2 runtime                load SYSREQS_PKG once it is built; only its
+#                                  *headers* are withheld, which is the point
 # Deliberately absent: a compiler, and libxml2's *headers*. The stages below
 # run on a bare image precisely to prove the shipped binary needs neither.
 runtime_prereqs() {
@@ -198,7 +230,30 @@ endgroup
 
 # --------------------------------------------------------------- stage: R ---
 
-if ! skipped r; then
+if ! skipped r && expect_fail r; then
+    # Distros below the portable builds' glibc floor (#212). The matrix used to
+    # record this in prose, which meant every PR touching these paths carried a
+    # permanently red check that meant nothing — and a red check nobody reads is
+    # how a real failure hides. Assert the refusal instead.
+    group "Install R ($R_LATEST) — expected to fail on this distro"
+    if out="$("$UVR" r install "$R_LATEST" 2>&1)"; then
+        printf '%s\n' "$out"
+        fail "uvr installed R here, but the matrix records this distro as unsupported.
+       If the floor moved or portable builds gained coverage, drop the
+       'expect' block from this entry in distro_matrix.json."
+    fi
+    printf '%s\n' "$out"
+    printf '%s\n' "$out" | grep -qF "$EXPECT_FAIL_MESSAGE" || fail \
+        "uvr refused to install R, but not for the documented reason.
+       wanted: $EXPECT_FAIL_MESSAGE
+       This is the #212 message regressing into something a user cannot act on."
+    endgroup
+    note "expected failure confirmed: $EXPECT_FAIL_MESSAGE"
+    # Every stage below needs a working R, so there is nothing further to ask
+    # this distro. Stopping here is the answer, not a truncation.
+    note "distro suite complete (no R on this platform, as recorded)"
+    exit 0
+elif ! skipped r; then
     group "Install R ($R_VERSIONS)"
     for v in $R_VERSIONS; do
         "$UVR" r install "$v"
@@ -223,12 +278,12 @@ fi
 if [ "$libc" = musl ]; then
     note "skipping the binary stage: no binary repo exists for musl"
 elif ! skipped binary; then
-    group "Binary package install ($SMOKE_PKG)"
+    group "Binary package install ($BINARY_PKG)"
     work=/tmp/binary-smoke
     rm -rf "$work" && mkdir -p "$work" && cd "$work"
     "$UVR" init --here binary-smoke --r-version "$R_LATEST"
-    printf 'library(%s); cat("binary-smoke-ok\\n")\n' "$SMOKE_PKG" > check.R
-    "$UVR" add "$SMOKE_PKG"
+    printf 'library(%s); cat("binary-smoke-ok\\n")\n' "$BINARY_PKG" > check.R
+    "$UVR" add "$BINARY_PKG"
     "$UVR" run check.R
     cd "$ROOT"
     endgroup
@@ -251,22 +306,22 @@ fi
 # directory` having printed no warning at all — which is why the assertion is
 # "the build works" rather than "the warning is absent".
 if ! skipped sysreqs; then
-    group "System dependency resolution ($SMOKE_PKG from source)"
+    group "System dependency resolution ($SYSREQS_PKG from source)"
     # shellcheck disable=SC2046  # deliberate word splitting: a package list
     pm_install $(build_prereqs)
 
     work=/tmp/sysreqs-smoke
     rm -rf "$work" && mkdir -p "$work" && cd "$work"
     "$UVR" init --here sysreqs-smoke --r-version "$R_LATEST"
-    printf 'library(%s); cat("sysreqs-smoke-ok\\n")\n' "$SMOKE_PKG" > check.R
+    printf 'library(%s); cat("sysreqs-smoke-ok\\n")\n' "$SYSREQS_PKG" > check.R
 
     if sysreqs_autoinstall_supported; then
-        UVR_INSTALL_SYSREQS=1 "$UVR" add "$SMOKE_PKG" --no-binary 2>&1 | tee add.log
+        UVR_INSTALL_SYSREQS=1 "$UVR" add "$SYSREQS_PKG" --no-binary 2>&1 | tee add.log
         "$UVR" run check.R
     else
         # zypper/pacman: uvr cannot run the install itself, so assert it at
         # least named the package a human would then install.
-        "$UVR" add "$SMOKE_PKG" --no-binary > add.log 2>&1 || true
+        "$UVR" add "$SYSREQS_PKG" --no-binary > add.log 2>&1 || true
         grep -Eq 'libxml2-dev(el)?' add.log \
             || fail "uvr did not name libxml2's devel package; see add.log"
     fi

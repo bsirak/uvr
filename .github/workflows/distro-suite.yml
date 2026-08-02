@@ -49,7 +49,11 @@ env:
   # is the distro, and the R-version axis is already covered on ubuntu/macOS/
   # Windows by ci.yml.
   R_VERSIONS: "4.5.1"
-  SMOKE_PKG: xml2
+  # The binary stage tests repo *selection*, so it needs a package P3M builds
+  # for every repo; the sysreqs stage tests devel-package resolution, so it
+  # needs one with an external system library. See ci/distro-suite.sh.
+  BINARY_PKG: jsonlite
+  SYSREQS_PKG: xml2
 
 jobs:
   # Which images to run: the `pr` subset on pull requests (one per package
@@ -162,12 +166,20 @@ jobs:
         # there and let the earlier stages carry them.
         env:
           SKIP_STAGES: ${{ !matrix.entry.sysreqs.api && !matrix.entry.sysreqs.local && 'sysreqs' || '' }}
+          # Entries the matrix records as unsupported assert the refusal rather
+          # than skipping the stage — see `expect_fail` in ci/distro-suite.sh.
+          # Absent `expect` yields empty strings, which disables it.
+          EXPECT_FAIL_STAGE: ${{ matrix.entry.expect.stage }}
+          EXPECT_FAIL_MESSAGE: ${{ matrix.entry.expect.message }}
         run: |
           docker run --rm \
             -v "$PWD:/work" -w /work \
             -e "R_VERSIONS=${R_VERSIONS}" \
-            -e "SMOKE_PKG=${SMOKE_PKG}" \
+            -e "BINARY_PKG=${BINARY_PKG}" \
+            -e "SYSREQS_PKG=${SYSREQS_PKG}" \
             -e "SKIP_STAGES=${SKIP_STAGES}" \
+            -e "EXPECT_FAIL_STAGE=${EXPECT_FAIL_STAGE}" \
+            -e "EXPECT_FAIL_MESSAGE=${EXPECT_FAIL_MESSAGE}" \
             "${{ matrix.entry.image }}" \
             sh ci/distro-suite.sh
 
