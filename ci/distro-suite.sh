@@ -87,6 +87,15 @@ skipped() {
 # unnoticed.
 expect_fail() { [ "$EXPECT_FAIL_STAGE" = "$1" ]; }
 
+# An expectation with no message would match *any* failure, quietly turning the
+# strongest assertion in the suite into "this distro may fail for any reason".
+# Refuse it at the top rather than pass a distro for the wrong reason.
+if [ -n "$EXPECT_FAIL_STAGE" ] && [ -z "$EXPECT_FAIL_MESSAGE" ]; then
+    fail "expect.stage=$EXPECT_FAIL_STAGE with no expect.message: an expectation
+       that matches any failure is not an assertion. Add the substring uvr must
+       print to this entry in distro_matrix.json."
+fi
+
 # --------------------------------------------------------- distro plumbing ---
 
 # The one place that knows package-manager dialects. Adding a distro to the
