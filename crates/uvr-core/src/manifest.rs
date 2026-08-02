@@ -120,6 +120,89 @@ pub struct PackageSource {
 impl std::str::FromStr for Manifest {
     type Err = crate::error::UvrError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        // First parse to Value so we can detect dotted-key traps before
+        // serde silently discards them.
+        let raw: toml::Value =
+            toml::from_str(s).map_err(|e| crate::error::UvrError::ManifestParse(e.to_string()))?;
+
+        // Validate [dependencies] and [dev-dependencies]: every value must be
+        // a string (bare version) or a table whose keys are known DetailedDep
+        // fields {version, bioc, git, rev}. A TOML table-header entry like
+        // `[dependencies.data.table]` creates a nested table under key `data`
+        // with a sub-key `table` — not a valid DetailedDep field. This check
+        // catches that case before serde silently resolves the wrong package.
+        //
+        // NOTE: `VALID_DEP_KEYS` must list every field of `DetailedDep`. A
+        // field added to that struct without updating this slice will cause
+        // valid manifests to be rejected — keep them in sync.
+        const VALID_DEP_KEYS: &[&str] = &["version", "bioc", "git", "rev"];
+
+        for section in &["dependencies", "dev-dependencies"] {
+            if let Some(toml::Value::Table(deps)) = raw.get(*section) {
+                for (key, val) in deps {
+                    if let toml::Value::Table(inner) = val {
+                        // A valid DetailedDep table has only known field keys.
+                        // Any other key signals a dotted-key trap: the user
+                        // wrote `[dependencies.org.Hs.eg.db]` which TOML parsed
+                        // as key=`org`, sub-table={Hs: {eg: {db: ...}}}.
+                        //
+                        // Walk the nested table chain to reconstruct the full
+                        // dotted package name (e.g. `org.Hs.eg.db` not just
+                        // `org.Hs`), so the error message shows the correct
+                        // name to quote.
+                        let unknown: Vec<&str> = inner
+                            .keys()
+                            .map(String::as_str)
+                            .filter(|k| !VALID_DEP_KEYS.contains(k))
+                            .collect();
+                        if !unknown.is_empty() {
+                            // Walk into nested tables to collect the full name.
+                            // Stop when we reach a leaf or a valid DetailedDep.
+                            let full_name = {
+                                let mut parts = vec![key.as_str()];
+                                let mut cur = inner;
+                                loop {
+                                    // Find the first non-DetailedDep key at this level
+                                    let next = cur
+                                        .keys()
+                                        .map(String::as_str)
+                                        .find(|k| !VALID_DEP_KEYS.contains(k));
+                                    match next {
+                                        Some(k) => {
+                                            parts.push(k);
+                                            match cur.get(k) {
+                                                Some(toml::Value::Table(t)) => cur = t,
+                                                _ => break,
+                                            }
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                parts.join(".")
+                            };
+                            return Err(crate::error::UvrError::ManifestParse(format!(
+                                "dependency `{key}` in [{section}] contains dotted sub-key(s): \
+                                 {unknown:?}.\n\
+                                 \n\
+                                 This is caused by a dotted TOML key: \
+                                 `[{section}.{full_name}]` is parsed by TOML as \
+                                 package `{key}` with nested sub-keys, not as \
+                                 package `{full_name}`.\n\
+                                 \n\
+                                 If you meant to declare package `{full_name}`, \
+                                 use a quoted key in the flat [{section}] table:\n\
+                                 \n\
+                                 \t[{section}]\n\
+                                 \t\"{full_name}\" = \"*\"\n\
+                                 \n\
+                                 Or run: uvr add {full_name}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         toml::from_str(s).map_err(|e| crate::error::UvrError::ManifestParse(e.to_string()))
     }
 }
@@ -933,5 +1016,162 @@ bioc = true
             }
             other => panic!("expected Detailed, got {other:?}"),
         }
+    }
+
+    // --- Dotted-key trap detection ---
+
+    #[test]
+    fn dotted_key_single_dot_is_rejected() {
+        // `[dependencies.data.table]` → TOML key `data`, sub-key `table`
+        let toml = r#"
+[project]
+name = "test"
+r_version = "4.5"
+
+[dependencies.data.table]
+version = "*"
+"#;
+        let err = toml.parse::<Manifest>().unwrap_err().to_string();
+        assert!(
+            err.contains("data") && err.contains("table"),
+            "expected dotted-key error mentioning 'data' and 'table', got: {err}"
+        );
+        assert!(
+            err.contains("dotted TOML key") || err.contains("sub-key"),
+            "expected actionable error message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dotted_key_r_prefix_is_rejected() {
+        // `[dependencies.R.utils]` → key `R`, sub-key `utils`
+        let toml = r#"
+[project]
+name = "test"
+r_version = "4.5"
+
+[dependencies.R.utils]
+version = "*"
+"#;
+        let err = toml.parse::<Manifest>().unwrap_err().to_string();
+        assert!(
+            err.contains("utils"),
+            "expected mention of 'utils', got: {err}"
+        );
+    }
+
+    #[test]
+    fn dotted_key_bioc_flag_is_rejected() {
+        // `[dependencies.org.Hs.eg.db]` with `bioc = true` silently drops flag.
+        // The error must name the *full* package (`org.Hs.eg.db`), not just the
+        // first two segments (`org.Hs`), so the user can follow the advice verbatim.
+        let toml = r#"
+[project]
+name = "test"
+r_version = "4.5"
+
+[dependencies.org.Hs.eg.db]
+bioc = true
+"#;
+        let err = toml.parse::<Manifest>().unwrap_err().to_string();
+        assert!(
+            err.contains("org.Hs.eg.db"),
+            "error must name the full package 'org.Hs.eg.db', got: {err}"
+        );
+        assert!(
+            err.contains("uvr add org.Hs.eg.db"),
+            "error must suggest 'uvr add org.Hs.eg.db', got: {err}"
+        );
+    }
+
+    #[test]
+    fn dotted_key_four_segments_reconstructed() {
+        // TxDb.Hsapiens.UCSC.hg38.knownGene — five segments, common Bioc annotation package.
+        // The advice must name the full package, not just the first two segments.
+        let toml = r#"
+[project]
+name = "test"
+r_version = "4.5"
+
+[dependencies.TxDb.Hsapiens.UCSC.hg38.knownGene]
+bioc = true
+"#;
+        let err = toml.parse::<Manifest>().unwrap_err().to_string();
+        assert!(
+            err.contains("TxDb.Hsapiens.UCSC.hg38.knownGene"),
+            "error must name the full package, got: {err}"
+        );
+        assert!(
+            err.contains("uvr add TxDb.Hsapiens.UCSC.hg38.knownGene"),
+            "error must suggest correct uvr add command, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dotted_key_dev_dependencies_is_rejected() {
+        // Same trap applies to [dev-dependencies]
+        let toml = r#"
+[project]
+name = "test"
+r_version = "4.5"
+
+[dev-dependencies.shiny.test]
+version = "*"
+"#;
+        let err = toml.parse::<Manifest>().unwrap_err().to_string();
+        assert!(err.contains("shiny") || err.contains("test"), "got: {err}");
+    }
+
+    #[test]
+    fn quoted_dot_package_names_are_accepted() {
+        // Quoted keys `"data.table"`, `"R.utils"`, `"org.Hs.eg.db"` must parse fine.
+        let toml = r#"
+[project]
+name = "test"
+r_version = "4.5"
+
+[dependencies]
+"data.table" = "*"
+"R.utils" = { version = "*" }
+"shiny.i18n" = "*"
+
+[dependencies."org.Hs.eg.db"]
+bioc = true
+"#;
+        let m: Manifest = toml.parse().expect("quoted dot-names must parse");
+        assert!(
+            m.dependencies.contains_key("data.table"),
+            "data.table missing"
+        );
+        assert!(m.dependencies.contains_key("R.utils"), "R.utils missing");
+        assert!(
+            m.dependencies.contains_key("shiny.i18n"),
+            "shiny.i18n missing"
+        );
+        let org = m.dependencies.get("org.Hs.eg.db").unwrap();
+        assert!(org.is_bioc(), "org.Hs.eg.db should be bioc=true");
+    }
+
+    #[test]
+    fn table_header_syntax_with_valid_fields_is_accepted() {
+        // `[dependencies.DESeq2]` with known DetailedDep fields must still work.
+        let toml = r#"
+[project]
+name = "test"
+r_version = "4.5"
+
+[dependencies.DESeq2]
+bioc = true
+
+[dependencies.myPkg]
+git = "user/repo"
+rev = "main"
+"#;
+        let m: Manifest = toml.parse().expect("valid table-header syntax must parse");
+        assert!(m.dependencies.get("DESeq2").unwrap().is_bioc());
+        assert_eq!(
+            m.dependencies.get("myPkg").unwrap().git(),
+            Some("user/repo")
+        );
     }
 }
