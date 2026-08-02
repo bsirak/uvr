@@ -1037,7 +1037,10 @@ r_version = "4.5"
 version = "*"
 "#;
         let err = toml.parse::<Manifest>().unwrap_err().to_string();
-        assert!(err.contains("utils"), "expected mention of 'utils', got: {err}");
+        assert!(
+            err.contains("utils"),
+            "expected mention of 'utils', got: {err}"
+        );
     }
 
     #[test]
@@ -1099,10 +1102,7 @@ r_version = "4.5"
 version = "*"
 "#;
         let err = toml.parse::<Manifest>().unwrap_err().to_string();
-        assert!(
-            err.contains("shiny") || err.contains("test"),
-            "got: {err}"
-        );
+        assert!(err.contains("shiny") || err.contains("test"), "got: {err}");
     }
 
     #[test]
@@ -1122,9 +1122,15 @@ r_version = "4.5"
 bioc = true
 "#;
         let m: Manifest = toml.parse().expect("quoted dot-names must parse");
-        assert!(m.dependencies.contains_key("data.table"), "data.table missing");
+        assert!(
+            m.dependencies.contains_key("data.table"),
+            "data.table missing"
+        );
         assert!(m.dependencies.contains_key("R.utils"), "R.utils missing");
-        assert!(m.dependencies.contains_key("shiny.i18n"), "shiny.i18n missing");
+        assert!(
+            m.dependencies.contains_key("shiny.i18n"),
+            "shiny.i18n missing"
+        );
         let org = m.dependencies.get("org.Hs.eg.db").unwrap();
         assert!(org.is_bioc(), "org.Hs.eg.db should be bioc=true");
     }
@@ -1146,6 +1152,9 @@ rev = "main"
 "#;
         let m: Manifest = toml.parse().expect("valid table-header syntax must parse");
         assert!(m.dependencies.get("DESeq2").unwrap().is_bioc());
-        assert_eq!(m.dependencies.get("myPkg").unwrap().git(), Some("user/repo"));
+        assert_eq!(
+            m.dependencies.get("myPkg").unwrap().git(),
+            Some("user/repo")
+        );
     }
 }
