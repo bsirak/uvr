@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 
 use crate::error::Result;
 use crate::r_version::downloader::Platform;
+use crate::registry::p3m_status;
 use crate::resolver::normalize_version;
 
 /// Pre-built binary package index from Posit Package Manager (P3M).
@@ -45,7 +46,11 @@ impl P3MBinaryIndex {
         bioc_release: Option<&str>,
         posit_distro_slug: Option<&str>,
     ) -> Self {
-        let Some(info) = platform_info(platform, posit_distro_slug, r_minor) else {
+        // Ask Posit which repo actually has builds for this distro *and* this
+        // architecture before falling back to the compiled-in table (#211).
+        let live_repo = live_linux_repo(client, platform).await;
+        let Some(info) = platform_info(platform, posit_distro_slug, r_minor, live_repo.as_ref())
+        else {
             // Unsupported platform combination: macOS x86 / Windows always
             // OK; Linux only when we recognise the distro. Falls through
             // to source — same behavior as before #55.
@@ -295,10 +300,18 @@ struct PlatformInfo {
 /// `posit_distro_slug` should be the same slug uvr uses for the R install
 /// URL (`ubuntu-2204`, `debian-12`, `rhel-9`, …); we translate it to PPM's
 /// codename system (`jammy`, `bookworm`, `rhel9`) here.
+/// `live_repo` carries the platform catalog's answer for this host, when it
+/// could be reached: `Some(Some(codename))` to install from that repo,
+/// `Some(None)` for "Posit publishes nothing usable here", and `None` for
+/// "the catalog was unavailable, use the compiled-in table". The middle case
+/// is a real answer and must not be second-guessed by the table — it is how
+/// an arm64 host on an x86_64-only distro gets routed to the portable repo
+/// rather than to a repo that would silently serve it source.
 fn platform_info(
     platform: Platform,
     posit_distro_slug: Option<&str>,
     r_minor: &str,
+    live_repo: Option<&Option<String>>,
 ) -> Option<PlatformInfo> {
     match platform {
         // #72 / #53 / #102: the correct arm64 channel depends on the R
@@ -342,8 +355,10 @@ fn platform_info(
             // PPM Linux only — Bioc binary support comes via Bioconductor's
             // own server, which doesn't serve Linux binaries today; Bioc on
             // Linux falls back to source as before.
-            let slug = posit_distro_slug?;
-            let codename = ppm_linux_repo(slug)?;
+            let codename: String = match live_repo {
+                Some(live) => live.clone()?,
+                None => ppm_linux_repo(posit_distro_slug?)?.to_string(),
+            };
             let arch = if matches!(platform, Platform::LinuxX86_64) {
                 "x86_64"
             } else {
@@ -362,7 +377,7 @@ fn platform_info(
                 cache_key: format!("linux-{codename}-{arch}"),
                 pkg_ext: "tar.gz",
                 is_linux: true,
-                linux_codename: Some(codename.to_string()),
+                linux_codename: Some(codename),
                 user_agent: Some(user_agent),
             })
         }
@@ -422,6 +437,79 @@ pub fn ppm_linux_codename(posit_slug: &str) -> Option<&'static str> {
 /// function of the slug; that mapping stays pure for tests.
 pub fn ppm_linux_repo(posit_slug: &str) -> Option<&'static str> {
     ppm_linux_codename(posit_slug).or_else(crate::r_version::downloader::ppm_manylinux_repo)
+}
+
+/// Ask Posit's platform catalog which repo this host should install from.
+///
+/// Returns `None` when the catalog could not answer — unreachable, or it has
+/// never heard of this `(distribution, release)` pair — and the caller should
+/// use the compiled-in table, which knows aliases the catalog does not
+/// publish (Rocky 8 is not a catalog entry, but its binaries are `centos8`).
+///
+/// `Some(None)` is the catalog declining: it builds for this distro, just not
+/// for this architecture, and there is no portable repo to fall back to
+/// either. That answer is authoritative and the table must not override it.
+///
+/// The lookup keys on the same `(distribution, release)` pair the sysreqs
+/// catalog uses, which is what `normalize_distro` already produces — the two
+/// Posit catalogs speak one vocabulary, so uvr needs only one translation
+/// from `/etc/os-release` rather than the two it used to keep in sync.
+async fn live_linux_repo(client: &reqwest::Client, platform: Platform) -> Option<Option<String>> {
+    let arch = match platform {
+        Platform::LinuxX86_64 => "x86_64",
+        Platform::LinuxArm64 => "arm64",
+        // macOS and Windows binaries don't come from the __linux__ repos.
+        _ => return None,
+    };
+
+    // `--distribution X` is the user telling uvr its autodetection is wrong
+    // here (#54). The catalog lookup starts from that same autodetection, so
+    // honouring the override means not running it.
+    if crate::r_version::downloader::distro_override_is_set() {
+        return None;
+    }
+
+    let os = crate::os_release::detect()?;
+    if os.id.is_empty() || os.version_id.is_empty() {
+        return None;
+    }
+    let (distribution, release) = crate::sysreqs::normalize_distro(&os.id, &os.version_id);
+    // Both Posit catalogs have the same holes in that vocabulary — neither
+    // publishes `rockylinux` 8 or `centos` 9/10 — so the same alias applies
+    // here as when asking for sysreqs. Without it Rocky/Alma 8 and CentOS
+    // Stream fall through to the static table and lose the architecture
+    // awareness this function exists for.
+    let (distribution, release) = crate::sysreqs::catalog_alias(&distribution, &release);
+
+    let distros = p3m_status::fetch(client).await?;
+
+    if let Some(codename) = p3m_status::codename_for(&distros, distribution, release, arch) {
+        debug!("P3M catalog: {distribution}/{release} on {arch} serves from {codename}");
+        return Some(Some(codename.to_string()));
+    }
+
+    // Distinguish "the catalog has never heard of this pair" from "it has, but
+    // not for this architecture". Only the second is an authoritative no; the
+    // first leaves room for the static table's aliases.
+    if !p3m_status::is_known(&distros, distribution, release) {
+        debug!("P3M catalog has no entry for {distribution}/{release}; using the static table");
+        return None;
+    }
+
+    // The distro repo has no build for this architecture — the arm64 case.
+    // The portable repo is built for both, so prefer it over a repo that
+    // would quietly serve source, provided the host clears its glibc floor.
+    if crate::r_version::downloader::ppm_manylinux_repo().is_some() {
+        if let Some(codename) = p3m_status::portable_codename(&distros, arch) {
+            debug!(
+                "P3M catalog: {distribution}/{release} has no {arch} build; \
+                 using the portable {codename} repo"
+            );
+            return Some(Some(codename.to_string()));
+        }
+    }
+    debug!("P3M catalog: nothing serves {distribution}/{release} on {arch}");
+    Some(None)
 }
 
 fn cache_path(r_minor: &str, key: &str) -> PathBuf {
@@ -541,12 +629,12 @@ Version: 1.1.4
     fn platform_info_macos_arm64() {
         // #102: R <= 4.5 arm64 binaries live on the Big Sur channel,
         // R >= 4.6 on the Sonoma channel.
-        let info = platform_info(Platform::MacOsArm64, None, "4.5").unwrap();
+        let info = platform_info(Platform::MacOsArm64, None, "4.5", None).unwrap();
         assert_eq!(info.url_segment, "macosx/big-sur-arm64");
         assert_eq!(info.pkg_ext, "tgz");
         assert!(!info.is_linux);
 
-        let info = platform_info(Platform::MacOsArm64, None, "4.6").unwrap();
+        let info = platform_info(Platform::MacOsArm64, None, "4.6", None).unwrap();
         assert_eq!(info.url_segment, "macosx/sonoma-arm64");
     }
 
@@ -563,16 +651,50 @@ Version: 1.1.4
 
     #[test]
     fn platform_info_windows() {
-        let info = platform_info(Platform::WindowsX86_64, None, "4.5").unwrap();
+        let info = platform_info(Platform::WindowsX86_64, None, "4.5", None).unwrap();
         assert_eq!(info.url_segment, "windows");
         assert_eq!(info.pkg_ext, "zip");
         assert!(!info.is_linux);
     }
 
     #[test]
+    fn live_catalog_answer_wins_over_the_static_table() {
+        // ubuntu-2204 maps to `jammy` in the table, but jammy has no arm64
+        // build. When the catalog says "use the portable repo", that is the
+        // repo uvr must use — the table's answer would have quietly fetched
+        // source on arm64 (#211).
+        let info = platform_info(
+            Platform::LinuxArm64,
+            Some("ubuntu-2204"),
+            "4.5",
+            Some(&Some("manylinux_2_28".to_string())),
+        )
+        .expect("the catalog named a repo");
+        assert_eq!(info.linux_codename.as_deref(), Some("manylinux_2_28"));
+    }
+
+    #[test]
+    fn live_catalog_declining_means_source() {
+        // `Some(None)`: Posit builds for this distro but not for this arch,
+        // and the portable repo can't help either (musl, or glibc below the
+        // floor). That is an authoritative no, so the static table must not
+        // get a second vote.
+        assert!(
+            platform_info(
+                Platform::LinuxArm64,
+                Some("ubuntu-2204"),
+                "4.5",
+                Some(&None)
+            )
+            .is_none(),
+            "a declining catalog must not fall back to the table"
+        );
+    }
+
+    #[test]
     fn platform_info_linux_supported_distro() {
         // #55: Linux gets a binary index when the distro maps to a PPM codename.
-        let info = platform_info(Platform::LinuxX86_64, Some("ubuntu-2204"), "4.5")
+        let info = platform_info(Platform::LinuxX86_64, Some("ubuntu-2204"), "4.5", None)
             .expect("ubuntu-2204 covered");
         assert!(info.is_linux);
         assert_eq!(info.linux_codename.as_deref(), Some("jammy"));
@@ -591,7 +713,7 @@ Version: 1.1.4
         // binaries and the caller compiles from source. Assert the property
         // rather than one host's answer, so this passes on every runner.
         for slug in ["slackware-15", "nixos-2411"] {
-            let info = platform_info(Platform::LinuxX86_64, Some(slug), "4.5");
+            let info = platform_info(Platform::LinuxX86_64, Some(slug), "4.5", None);
             match crate::r_version::downloader::ppm_manylinux_repo() {
                 Some(repo) => {
                     let info = info.expect("manylinux host should still get a repo");
@@ -601,7 +723,7 @@ Version: 1.1.4
             }
         }
         // Without a slug there is nothing to translate, on any host.
-        assert!(platform_info(Platform::LinuxX86_64, None, "4.5").is_none());
+        assert!(platform_info(Platform::LinuxX86_64, None, "4.5", None).is_none());
     }
 
     #[test]
@@ -709,14 +831,14 @@ Version: 1.1.4
         // Reviewer flagged the prior hardcoded "4.5.3" UA as a future
         // staleness risk if PPM tightens its UA matching. r_minor flows
         // through and shows up in the UA — verify both arch variants.
-        let info_x86 =
-            platform_info(Platform::LinuxX86_64, Some("ubuntu-2204"), "4.6").expect("supported");
+        let info_x86 = platform_info(Platform::LinuxX86_64, Some("ubuntu-2204"), "4.6", None)
+            .expect("supported");
         let ua = info_x86.user_agent.expect("Linux gets a UA");
         assert!(ua.starts_with("R (4.6.0 x86_64-pc-linux-gnu"), "got {ua}");
         assert!(ua.contains("linux-gnu"));
 
         let info_arm =
-            platform_info(Platform::LinuxArm64, Some("debian-12"), "4.5").expect("supported");
+            platform_info(Platform::LinuxArm64, Some("debian-12"), "4.5", None).expect("supported");
         let ua = info_arm.user_agent.expect("Linux gets a UA");
         assert!(ua.starts_with("R (4.5.0 aarch64-pc-linux-gnu"), "got {ua}");
     }

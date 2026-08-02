@@ -18,6 +18,17 @@ Pure tracking section — fixes and small features land here between tags.
   tarballs are downloaded and reads `SystemRequirements` from each one's
   DESCRIPTION, which is where the field is actually published.
 
+- Binary package repos are chosen from Posit's live platform catalog, and the
+  choice now accounts for the host architecture. uvr matched a hardcoded
+  slug → repo table with no notion of arch, but only `rhel9`, `rhel10`,
+  `noble`, `resolute` and `manylinux_2_28` carry arm64 builds — and P3M
+  degrades to *source* when a repo has no build for the caller's architecture.
+  An arm64 host on Ubuntu 22.04, Debian 12, RHEL 8 or openSUSE was therefore
+  compiling every package while the portable `manylinux_2_28` repo, which does
+  build for arm64, sat unused. uvr now reads `GET /__api__/status` (cached
+  daily) and picks a repo that actually serves this distro on this
+  architecture. The compiled-in table still answers when the endpoint is
+  unreachable, and `--distribution` still wins over both.
 - Oracle Linux gets binary packages, not just system dependencies (#209
   follow-up). `ID="ol"` was aliased onto RHEL for sysreqs but not for the P3M
   slug, so OL hosts resolved their system libraries correctly and then
