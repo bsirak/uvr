@@ -311,8 +311,8 @@ Bugs this design surfaced before any of it ran in CI, and where each landed:
 | Alpine resolves no sysreqs at all — CRAN's `PACKAGES` carries no `SystemRequirements` | #208, closing #207 — re-verified green |
 | R's `utils` calls `system(which ...)` in `.onLoad` and won't load without `which` | prerequisite here; `uvr doctor` could say so |
 | `curl` is a package *conflict* on RHEL images shipping `curl-minimal` | requested by command, not package |
-| uvr tells a zypper host to run `apt-get install -y libxml2-devel` — the same unconditional final branch as the row above, but reaching the user as an instruction that cannot work | open, needs its own issue |
-| `uvr add` **fails outright** when P3M serves source where the index promised a binary: the Linux `PACKAGES` index lists every package regardless of build coverage, so uvr announces "3 binary" and then rejects the download | open, needs its own issue |
+| uvr tells a zypper host to run `apt-get install -y libxml2-devel` — the same unconditional final branch as the row above, but reaching the user as an instruction that cannot work; `uvr doctor` hardcodes it too | #226 |
+| `uvr add` **fails outright** when P3M serves source where the index promised a binary: the Linux `PACKAGES` index lists every package regardless of build coverage, so uvr announces "3 binary" and then rejects the download | #225 |
 
 The first four are why this document's own matrix data had to be rewritten before
 merge: a matrix that describes gaps as open after they are closed is worse than no
