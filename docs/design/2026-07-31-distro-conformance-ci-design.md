@@ -178,21 +178,41 @@ Stages, in order:
 3. **r** — install R and list it. Exercises the portable-build download, extract and
    `R --version` validation on this distro's libc.
 
-   Three entries — `rhel-8`, `ubuntu-2004`, `debian-11` — sit below the portable
-   builds' glibc 2.34 floor and *cannot* pass this stage. They carry an `expect`
-   block naming the stage and the substring uvr must print:
+   Seven entries sit below the portable builds' glibc 2.34 floor and *cannot* pass
+   this stage — `rhel-8`, `rocky-8`, `almalinux-8`, `oracle-8` (all 2.28),
+   `ubuntu-2004`, `debian-11`, `opensuse-155` (all 2.31). The floor lands exactly
+   on the RHEL 8 → 9 line: every `*-9` entry reports precisely 2.34.
 
-   ```json
-   "expect": { "stage": "r", "message": "is too old for portable R builds" }
-   ```
+   The suite **derives** that from the host, comparing `ldd --version` against
+   `R_GLIBC_FLOOR` (which mirrors `MANYLINUX_GLIBC_MIN` in `downloader.rs`), and
+   asserts the refusal instead of dying on it, then stops — nothing downstream can
+   run without R.
 
-   The stage then asserts the refusal instead of dying on it, and stops — nothing
-   downstream can run without R. Asserting rather than skipping is the point: a
-   skipped stage hides the limitation, and a permanently-red job nobody reads is how
-   a real failure hides. This way the lane is green, the limitation stays visible,
-   and it turns red in *both* directions — if uvr stops refusing (the floor moved,
-   update the matrix) or refuses for some other reason (#212's message regressed
-   into something a user can't act on).
+   It is derived rather than recorded per entry because recording it per entry is
+   what broke: the first version carried an `expect` block on each affected entry,
+   converted from a hand-written `note`, and only three entries had ever had the
+   note. The other four went straight through and failed the first nightly after
+   the pr lane went green (#230). A per-entry expectation is only as complete as
+   whoever remembered to write it; the floor is a property of the host, so the host
+   is what gets asked.
+
+   Asserting rather than skipping is the other half: a skipped stage hides the
+   limitation, and a permanently-red job nobody reads is how a real failure hides.
+   This way the lane is green, the limitation stays visible, and it turns red in
+   *both* directions — if uvr installs R below the floor (Posit started publishing
+   lower; update `R_GLIBC_FLOOR` and `MANYLINUX_GLIBC_MIN` together) or refuses for
+   some other reason (#212's message regressed into something a user can't act on).
+
+   Note that this is a **third** glibc number, and the three are independent:
+
+   | number | what it gates | set in |
+   |---|---|---|
+   | 2.34 | can the portable R builds run at all | `MANYLINUX_GLIBC_MIN`, downloader.rs |
+   | 2.28 | can uvr get P3M *binary packages* from the portable repo | `PPM_MANYLINUX_GLIBC_MIN`, downloader.rs |
+   | 2.28 | can the uvr binary itself start | `GLIBC_FLOOR`, ci/build-linux-gnu.sh (#212) |
+
+   #212 is why `uvr --version` and `uvr doctor` run on RHEL 8 at all; it does not
+   and cannot move the first row, which is Posit's build, not uvr's.
 4. **binary** — install and `library()` `BINARY_PKG`. #175: a binary from the
    wrong distro's repo installs happily and only fails at load, so the assertion has
    to load it. With no compiler present, an install that quietly falls back to a

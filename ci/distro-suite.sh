@@ -225,6 +225,38 @@ UVR="$DIST/uvr-$TARGET/uvr"
 note "install.sh would fetch: uvr-$TARGET.tar.gz"
 [ -x "$UVR" ] || fail "no release build for $TARGET under $DIST"
 
+# Whether the portable R builds can run here at all.
+#
+# Posit publishes them as manylinux_2_34, so a glibc host below 2.34 gets no R
+# — `MANYLINUX_GLIBC_MIN` in r_version/downloader.rs, and a different number
+# from both the 2.28 floor the uvr *binary* is built against (#212) and the
+# 2.28 `PPM_MANYLINUX_GLIBC_MIN` that gates binary *packages*. Three floors,
+# three meanings; only this one decides whether `uvr r install` can work.
+#
+# Derived from the host, deliberately. This used to be an `expect` block on
+# each entry, which meant it was only as complete as whoever remembered to add
+# one — and it was not: rocky-8, almalinux-8, oracle-8 and opensuse-155 are all
+# below the floor, none of them carried the block, and all four failed the
+# first nightly after the pr lane went green (#230). The floor is a property of
+# the host, so the host is what gets asked.
+R_GLIBC_FLOOR=2.34
+# Set by below_r_glibc_floor; reported by the stage below.
+hv=""
+
+below_r_glibc_floor() {
+    # musllinux builds carry no glibc floor; Alpine is judged on its own terms.
+    if [ "$libc" = musl ]; then return 1; fi
+    hv="$(ldd --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    # An unreadable ldd must not silently excuse a distro. Expect success and
+    # let the stage fail loudly if that was wrong.
+    if [ -z "$hv" ]; then return 1; fi
+    hmaj="${hv%%.*}"; hmin="${hv#*.}"; hmin="${hmin%%.*}"
+    fmaj="${R_GLIBC_FLOOR%%.*}"; fmin="${R_GLIBC_FLOOR#*.}"
+    if [ "$hmaj" -lt "$fmaj" ]; then return 0; fi
+    if [ "$hmaj" -eq "$fmaj" ] && [ "$hmin" -lt "$fmin" ]; then return 0; fi
+    return 1
+}
+
 # `--version` on a bare image is the whole glibc-floor question in one line: a
 # gnu binary linked against a newer glibc than this distro ships dies right
 # here, which is what a user hits seconds after running install.sh.
@@ -239,28 +271,28 @@ endgroup
 
 # --------------------------------------------------------------- stage: R ---
 
-if ! skipped r && expect_fail r; then
-    # Distros below the portable builds' glibc floor (#212). The matrix used to
-    # record this in prose, which meant every PR touching these paths carried a
-    # permanently red check that meant nothing — and a red check nobody reads is
-    # how a real failure hides. Assert the refusal instead.
-    group "Install R ($R_LATEST) — expected to fail on this distro"
+if ! skipped r && below_r_glibc_floor; then
+    # This host cannot run the portable R builds. Assert the refusal rather than
+    # skipping the stage: skipping hides the limitation, and a permanently red
+    # job nobody reads is how a real failure hides. Asserting keeps it visible
+    # *and* checked, in both directions.
+    group "Install R ($R_LATEST) — glibc $hv is below the $R_GLIBC_FLOOR floor"
     if out="$("$UVR" r install "$R_LATEST" 2>&1)"; then
         printf '%s\n' "$out"
-        fail "uvr installed R here, but the matrix records this distro as unsupported.
-       If the floor moved or portable builds gained coverage, drop the
-       'expect' block from this entry in distro_matrix.json."
+        fail "uvr installed R on glibc $hv, below the $R_GLIBC_FLOOR floor the
+       portable builds need. If Posit started publishing lower, update
+       R_GLIBC_FLOOR here and MANYLINUX_GLIBC_MIN in downloader.rs together."
     fi
     printf '%s\n' "$out"
-    printf '%s\n' "$out" | grep -qF "$EXPECT_FAIL_MESSAGE" || fail \
+    printf '%s\n' "$out" | grep -qF "too old for portable R builds" || fail \
         "uvr refused to install R, but not for the documented reason.
-       wanted: $EXPECT_FAIL_MESSAGE
-       This is the #212 message regressing into something a user cannot act on."
+       On a host below the floor it must say so in terms a user can act on;
+       this is #212's message regressing into a bare linker error."
     endgroup
-    note "expected failure confirmed: $EXPECT_FAIL_MESSAGE"
+    note "expected failure confirmed: glibc $hv < $R_GLIBC_FLOOR"
     # Every stage below needs a working R, so there is nothing further to ask
     # this distro. Stopping here is the answer, not a truncation.
-    note "distro suite complete (no R on this platform, as recorded)"
+    note "distro suite complete (no portable R below glibc $R_GLIBC_FLOOR)"
     exit 0
 elif ! skipped r; then
     group "Install R ($R_VERSIONS)"
