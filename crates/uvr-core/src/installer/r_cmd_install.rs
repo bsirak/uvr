@@ -394,8 +394,27 @@ impl RCmdInstall {
                 cmd.env("PATH", format!("{path_ext}{existing_path}"));
             }
         } else {
-            cmd.env("DYLD_LIBRARY_PATH", r_lib_str.as_ref())
-                .env("LD_LIBRARY_PATH", r_lib_str.as_ref());
+            // Prepend R's own lib dir to (DY)LD_LIBRARY_PATH rather than
+            // replacing it. The parent process may carry load-bearing entries
+            // — e.g. on HPC clusters where BLAS/LAPACK are provided as
+            // separate shared libraries (OpenBLAS, MKL, FlexiBLAS) whose paths
+            // are set by the environment module system. Clobbering that value
+            // causes R CMD INSTALL's lazy-loading phase to fail with
+            // "libRlapack.so: cannot open shared object file" even when the
+            // library is available under a module-provided path.
+            //
+            // This mirrors how the PATH extension is handled above (line
+            // `format!("{bin}:{p}")`): prepend, don't replace.
+            let prepend_lib = |var: &str| -> String {
+                match std::env::var(var) {
+                    Ok(existing) if !existing.is_empty() => {
+                        format!("{r_lib_str}:{existing}")
+                    }
+                    _ => r_lib_str.to_string(),
+                }
+            };
+            cmd.env("DYLD_LIBRARY_PATH", prepend_lib("DYLD_LIBRARY_PATH"))
+                .env("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH"));
 
             // Put the managed R's `bin` on PATH so package build scripts that
             // shell out to `Rscript` / `R` resolve them — e.g. cytolib /
