@@ -263,7 +263,17 @@ fn parse_cli_timeout(s: Option<&str>) -> Result<Option<std::time::Duration>> {
 
 fn hint_for(msg: &str) -> Option<&'static str> {
     let m = msg.to_ascii_lowercase();
-    if m.contains("not inside a uvr project") {
+    // Checked before the generic network cases: a rejected certificate is
+    // a trust problem, and telling the user to check their connection
+    // sends them to fix the wrong thing (#227).
+    if uvr_core::error::looks_like_certificate_failure(msg) {
+        Some(
+            "This is a TLS trust failure, not a connectivity problem. If you are behind a \
+             proxy or VPN that inspects TLS, install its CA certificate into your system \
+             trust store — uvr validates against it — or point SSL_CERT_FILE at the \
+             certificate file.",
+        )
+    } else if m.contains("not inside a uvr project") {
         Some("Run `uvr init` to create uvr.toml in this directory.")
     } else if m.contains("no lockfile") {
         Some("Run `uvr lock` to generate uvr.lock.")
@@ -290,5 +300,30 @@ fn hint_for(msg: &str) -> Option<&'static str> {
         )
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hint_for;
+
+    #[test]
+    fn certificate_failures_get_the_trust_hint_not_a_network_one() {
+        // #227: the message users actually see once the source chain is
+        // walked. It must route to trust-store advice, not "check your
+        // connection" — the whole point is that those need different fixes.
+        let msg = "Network error: error sending request for url \
+                   (https://cdn.posit.co/r/versions.json): client error (Connect): \
+                   invalid peer certificate: UnknownIssuer";
+        let hint = hint_for(msg).expect("certificate failure should carry a hint");
+        assert!(hint.contains("trust store"), "{hint}");
+        assert!(hint.contains("SSL_CERT_FILE"), "{hint}");
+    }
+
+    #[test]
+    fn ordinary_network_failures_do_not_get_the_trust_hint() {
+        let msg = "Network error: error sending request for url (https://example.org): \
+                   connection refused";
+        assert!(hint_for(msg).is_none_or(|h| !h.contains("trust store")));
     }
 }

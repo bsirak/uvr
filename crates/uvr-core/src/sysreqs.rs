@@ -12,6 +12,98 @@ pub struct SysReq {
     pub package: String,
 }
 
+/// A host package manager uvr knows how to name a command for.
+///
+/// Detection probes `PATH` rather than reading `/etc/os-release`: what
+/// matters here is which binary the user can actually run, and containers
+/// routinely disagree with their own os-release (a minimal RPM image may
+/// have `microdnf` and no `dnf`). uvr previously probed only `apk` and
+/// `dnf` and *guessed* `apt-get` otherwise, which told every zypper,
+/// pacman and yum-only host to run a command that isn't installed (#226).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageManager {
+    Apk,
+    Dnf,
+    Microdnf,
+    Yum,
+    Zypper,
+    Pacman,
+    AptGet,
+}
+
+impl PackageManager {
+    /// Probe `PATH` for a known package manager.
+    ///
+    /// Order matters where several can coexist: `dnf` outranks `yum`
+    /// because Fedora/RHEL 8+ ship `yum` as a compatibility symlink onto
+    /// `dnf`, and `dnf` outranks `microdnf` because a full `dnf` is
+    /// preferable when an image carries both. `None` means uvr genuinely
+    /// does not know — callers must say so rather than guess.
+    pub fn detect() -> Option<Self> {
+        const CANDIDATES: &[(&str, PackageManager)] = &[
+            ("apk", PackageManager::Apk),
+            ("dnf", PackageManager::Dnf),
+            ("microdnf", PackageManager::Microdnf),
+            ("yum", PackageManager::Yum),
+            ("zypper", PackageManager::Zypper),
+            ("pacman", PackageManager::Pacman),
+            ("apt-get", PackageManager::AptGet),
+        ];
+        CANDIDATES
+            .iter()
+            .find(|(bin, _)| which::which(bin).is_ok())
+            .map(|(_, pm)| *pm)
+    }
+
+    /// The executable name.
+    pub fn program(&self) -> &'static str {
+        match self {
+            Self::Apk => "apk",
+            Self::Dnf => "dnf",
+            Self::Microdnf => "microdnf",
+            Self::Yum => "yum",
+            Self::Zypper => "zypper",
+            Self::Pacman => "pacman",
+            Self::AptGet => "apt-get",
+        }
+    }
+
+    /// Arguments that install the packages appended after them,
+    /// non-interactively. Mirrors `ci/distro-suite.sh`'s `pm_install`.
+    pub fn install_args(&self) -> Vec<&'static str> {
+        match self {
+            Self::Apk => vec!["add"],
+            Self::Dnf | Self::Microdnf | Self::Yum => vec!["install", "-y"],
+            Self::Zypper => vec!["--non-interactive", "install", "-y"],
+            Self::Pacman => vec!["-S", "--noconfirm", "--needed"],
+            Self::AptGet => vec!["install", "-y"],
+        }
+    }
+
+    /// The package providing a C/C++ toolchain, for the `uvr doctor` hint.
+    /// `build-essential` is Debian-only; naming it on openSUSE made both
+    /// halves of that sentence wrong (#226).
+    pub fn build_toolchain_package(&self) -> &'static str {
+        match self {
+            Self::Apk => "build-base",
+            Self::Dnf | Self::Microdnf | Self::Yum => "gcc gcc-c++ make",
+            Self::Zypper => "gcc gcc-c++ make",
+            Self::Pacman => "base-devel",
+            Self::AptGet => "build-essential",
+        }
+    }
+
+    /// A ready-to-paste install command for `packages`.
+    pub fn install_command(&self, packages: &[&str]) -> String {
+        format!(
+            "{} {} {}",
+            self.program(),
+            self.install_args().join(" "),
+            packages.join(" ")
+        )
+    }
+}
+
 /// Detect the Linux distribution from `/etc/os-release`, normalized onto the
 /// vocabulary the sysreqs catalogs use. Returns `id-version` like
 /// `"ubuntu-22.04"` or `"redhat-8"`.
@@ -424,6 +516,81 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_package_manager_names_a_runnable_install_command() {
+        // #226: uvr named `apt-get` on hosts that have no apt-get. Every
+        // variant must produce a command whose program is its own binary
+        // and which ends in the packages — no cross-distro guessing.
+        for pm in [
+            PackageManager::Apk,
+            PackageManager::Dnf,
+            PackageManager::Microdnf,
+            PackageManager::Yum,
+            PackageManager::Zypper,
+            PackageManager::Pacman,
+            PackageManager::AptGet,
+        ] {
+            let cmd = pm.install_command(&["libxml2-devel", "gdal-devel"]);
+            assert!(
+                cmd.starts_with(pm.program()),
+                "{cmd} should invoke {}",
+                pm.program()
+            );
+            assert!(cmd.ends_with("libxml2-devel gdal-devel"), "{cmd}");
+            assert!(
+                !pm.install_args().is_empty(),
+                "{} has no verb",
+                pm.program()
+            );
+            assert!(!pm.build_toolchain_package().is_empty());
+        }
+    }
+
+    #[test]
+    fn zypper_and_pacman_are_never_told_to_run_apt_get() {
+        // The exact bug: the correct package name paired with a command
+        // that isn't installed on the host.
+        assert_eq!(
+            PackageManager::Zypper.install_command(&["libxml2-devel"]),
+            "zypper --non-interactive install -y libxml2-devel"
+        );
+        assert_eq!(
+            PackageManager::Pacman.install_command(&["libxml2"]),
+            "pacman -S --noconfirm --needed libxml2"
+        );
+        assert_eq!(
+            PackageManager::Yum.install_command(&["libxml2-devel"]),
+            "yum install -y libxml2-devel"
+        );
+        // And the toolchain hint stops naming a Debian package everywhere.
+        assert_eq!(
+            PackageManager::Zypper.build_toolchain_package(),
+            "gcc gcc-c++ make"
+        );
+        assert_eq!(
+            PackageManager::Pacman.build_toolchain_package(),
+            "base-devel"
+        );
+        assert_eq!(PackageManager::Apk.build_toolchain_package(), "build-base");
+        assert_eq!(
+            PackageManager::AptGet.build_toolchain_package(),
+            "build-essential"
+        );
+    }
+
+    #[test]
+    fn detect_returns_something_runnable_or_nothing() {
+        // Whatever this host has, detection must not claim a manager whose
+        // binary isn't actually on PATH — that was the whole defect.
+        if let Some(pm) = PackageManager::detect() {
+            assert!(
+                which::which(pm.program()).is_ok(),
+                "detect() returned {} but it is not on PATH",
+                pm.program()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn bioc_packages_skip_the_posit_api_entirely() {

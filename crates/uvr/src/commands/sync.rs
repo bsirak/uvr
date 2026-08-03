@@ -1018,18 +1018,19 @@ async fn install_from_lockfile_with_r(
                         // back to a manual command shape so the user still has
                         // an actionable line even when uvr can't run it.
                         let installer = pick_sysreqs_installer(&all_pkgs);
+                        // The display hint is needed even when uvr can't run
+                        // the install (no sudo, or no package manager it
+                        // knows). Naming the packages and admitting uvr
+                        // doesn't know the command beats naming a command
+                        // that isn't installed (#226).
                         let install_cmd_display = match &installer {
                             Some((prog, args)) => format!("{} {}", prog, args.join(" ")),
-                            None => {
-                                if which::which("apk").is_ok() {
-                                    format!("apk add {}", all_pkgs.join(" "))
-                                } else if which::which("dnf").is_ok() {
-                                    format!("dnf install -y {}", all_pkgs.join(" "))
-                                } else {
-                                    format!("apt-get install -y {}", all_pkgs.join(" "))
-                                }
-                            }
+                            None => match uvr_core::sysreqs::PackageManager::detect() {
+                                Some(pm) => pm.install_command(&all_pkgs),
+                                None => String::new(),
+                            },
                         };
+                        let install_hint = sysreqs_install_hint(&install_cmd_display, &all_pkgs);
 
                         let want_run = sysreqs_install_enabled();
                         match (want_run, installer) {
@@ -1037,7 +1038,7 @@ async fn install_from_lockfile_with_r(
                                 ui::warn(
                                     "--install-system-deps requested, but `sudo` is not on PATH and uvr is not running as root.",
                                 );
-                                ui::hint(format!("Install manually: {install_cmd_display}"));
+                                ui::hint(&install_hint);
                                 ui::hint("Or run uvr as root in this container.");
                             }
                             (true, Some((install_program, install_args))) => {
@@ -1059,14 +1060,14 @@ async fn install_from_lockfile_with_r(
                                     }
                                     ui::success("System dependencies installed.");
                                 } else {
-                                    ui::hint(format!("Install with: {install_cmd_display}"));
+                                    ui::hint(&install_hint);
                                     ui::hint(
                                         "Continuing — some packages may fail to compile without these.",
                                     );
                                 }
                             }
                             (false, _) => {
-                                ui::hint(format!("Install with: {install_cmd_display}"));
+                                ui::hint(&install_hint);
                                 ui::hint(
                                     "Or set --install-system-deps / UVR_INSTALL_SYSREQS=1 to let uvr run that for you.",
                                 );
@@ -1598,6 +1599,26 @@ fn is_effective_root() -> bool {
 /// a non-root user, which fails with a permission error and no
 /// diagnostic. Same "sudo when not root" rule now applies across all
 /// three package managers.
+/// The line telling the user how to install missing system dependencies.
+///
+/// When uvr recognizes the host's package manager it names the exact
+/// command. When it doesn't, it names the packages and says to use the
+/// system package manager — because the alternative uvr used to print was
+/// an `apt-get` line on hosts that have no apt-get (#226), which is worse
+/// than no command at all: the package names were right and the command
+/// was the only wrong part.
+#[cfg(target_os = "linux")]
+fn sysreqs_install_hint(install_cmd_display: &str, packages: &[&str]) -> String {
+    if install_cmd_display.is_empty() {
+        format!(
+            "Install with your system package manager: {}",
+            packages.join(" ")
+        )
+    } else {
+        format!("Install with: {install_cmd_display}")
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn pick_sysreqs_installer(packages: &[&str]) -> Option<(String, Vec<String>)> {
     let pkgs: Vec<String> = packages.iter().map(|p| p.to_string()).collect();
@@ -1606,13 +1627,11 @@ fn pick_sysreqs_installer(packages: &[&str]) -> Option<(String, Vec<String>)> {
         return None;
     }
 
-    let (pkg_mgr, install_args): (&str, Vec<&str>) = if which::which("apk").is_ok() {
-        ("apk", vec!["add"])
-    } else if which::which("dnf").is_ok() {
-        ("dnf", vec!["install", "-y"])
-    } else {
-        ("apt-get", vec!["install", "-y"])
-    };
+    // No known package manager on PATH: uvr can't run the install and must
+    // not name a command that doesn't exist (#226). Callers fall back to
+    // naming the packages alone.
+    let pm = uvr_core::sysreqs::PackageManager::detect()?;
+    let (pkg_mgr, install_args) = (pm.program(), pm.install_args());
 
     if needs_sudo {
         let mut args = vec![pkg_mgr.to_string()];

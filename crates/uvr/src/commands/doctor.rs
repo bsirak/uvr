@@ -241,8 +241,19 @@ fn check_linux_tools(issues: &mut Vec<String>) {
     let has_gcc = which::which("gcc").is_ok() || which::which("cc").is_ok();
     simple_check("C compiler (gcc/cc)", has_gcc, None);
     if !has_gcc {
-        issues
-            .push("No C compiler found. Install with: sudo apt-get install build-essential".into());
+        // `build-essential` is a Debian package name and `apt-get` a Debian
+        // command; naming both on an openSUSE or Arch host made every word
+        // of the advice wrong (#226).
+        issues.push(match uvr_core::sysreqs::PackageManager::detect() {
+            Some(pm) => format!(
+                "No C compiler found. Install with: sudo {} {} {}",
+                pm.program(),
+                pm.install_args().join(" "),
+                pm.build_toolchain_package()
+            ),
+            None => "No C compiler found. Install a C toolchain with your system package manager."
+                .into(),
+        });
     }
 
     let has_make = which::which("make").is_ok();

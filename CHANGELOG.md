@@ -7,6 +7,24 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- uvr no longer tells zypper, pacman and yum-only hosts to run `apt-get`
+  (#226). The sysreqs hint probed for `apk` and `dnf` and then *guessed*
+  `apt-get`, so on openSUSE the package name was right and the command
+  didn't exist — on the one class of host where uvr can't run the install
+  itself and the hint is therefore the whole deliverable. Detection now
+  covers apk, dnf, microdnf, yum, zypper, pacman and apt-get, and when it
+  recognizes none of them it names the packages and says to use the system
+  package manager rather than inventing a command. `uvr doctor`'s C-compiler
+  advice is fixed the same way — it hardcoded a Debian command *and* a
+  Debian package name.
+- TLS failures say they are TLS failures (#227). `Network error: error
+  sending request for url (...)` was all a user saw when a certificate was
+  rejected, because `reqwest::Error`'s own `Display` renders only the
+  outermost layer and the real cause sits in the `source()` chain. Network
+  errors now include the underlying cause, and a certificate failure adds a
+  hint pointing at the system trust store and `SSL_CERT_FILE` instead of
+  leaving it indistinguishable from being offline.
+
 - System dependencies are resolved on distributions Posit's sysreqs API
   doesn't cover (#207). `SystemRequirements` was only ever read from the
   resolved repository's `PACKAGES` index, and CRAN's index doesn't publish
