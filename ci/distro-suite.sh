@@ -356,7 +356,26 @@ if ! skipped sysreqs; then
     "$UVR" init --here sysreqs-smoke --r-version "$R_LATEST"
     printf 'library(%s); cat("sysreqs-smoke-ok\\n")\n' "$SYSREQS_PKG" > check.R
 
-    if sysreqs_autoinstall_supported; then
+    if expect_fail sysreqs; then
+        # This host has a working toolchain that still cannot build R packages,
+        # because R's own Makeconf asks for a C standard its compiler predates.
+        # Asserting it keeps the limitation visible and checked; the sysreqs
+        # half is still verified by the common check below, which is the point
+        # — uvr resolves and installs the system dependency correctly here, and
+        # only the compile step fails.
+        if UVR_INSTALL_SYSREQS=1 "$UVR" add "$SYSREQS_PKG" --no-binary > add.log 2>&1; then
+            cat add.log
+            fail "the source build succeeded, but the matrix records this distro as
+       unable to compile R packages. If the toolchain moved or R's recorded
+       C standard changed, drop the 'expect' block from this entry."
+        fi
+        cat add.log
+        grep -qF "$EXPECT_FAIL_MESSAGE" add.log || fail \
+            "the source build failed, but not for the documented reason.
+       wanted: $EXPECT_FAIL_MESSAGE
+       Something else is broken here, or the known breakage has changed shape."
+        note "expected failure confirmed: $EXPECT_FAIL_MESSAGE"
+    elif sysreqs_autoinstall_supported; then
         UVR_INSTALL_SYSREQS=1 "$UVR" add "$SYSREQS_PKG" --no-binary 2>&1 | tee add.log
         "$UVR" run check.R
     else
