@@ -32,6 +32,7 @@ function Get-Target {
     switch ($arch) {
         "AMD64" { return "x86_64-pc-windows-msvc" }
         "ARM64" {
+            # TODO: switch to a native aarch64-pc-windows-msvc asset once one is published.
             Write-Log "No native ARM64 build published; using the x64 build under emulation."
             return "x86_64-pc-windows-msvc"
         }
@@ -68,14 +69,24 @@ function Get-ExpectedHash {
     return ($line.Line -split "\s+")[0]
 }
 
-function Test-InPath {
+function Add-ToUserPath {
     param([string]$Dir)
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $key = "HKCU:\Environment"
+    $raw = (Get-Item $key).GetValue("Path", "", "DoNotExpandEnvironmentNames")
+    $kind = (Get-Item $key).GetValueKind("Path")
     $entries = @()
-    if ($userPath) {
-        $entries = $userPath -split ";"
+    if ($raw) {
+        $entries = $raw -split ";" | Where-Object { $_ }
     }
-    return $entries -contains $Dir
+    $target = $Dir.TrimEnd("\")
+    $alreadyPresent = $entries | Where-Object { $_.TrimEnd("\") -ieq $target }
+    if ($alreadyPresent) {
+        return
+    }
+    $newPath = if ($raw) { "$raw;$Dir" } else { $Dir }
+    Set-ItemProperty -Path $key -Name Path -Value $newPath -Type $kind
+    Write-Log "Added $Dir to your user PATH."
+    Write-Log "Open a new terminal for the change to take effect there."
 }
 
 function main {
@@ -125,16 +136,8 @@ function main {
 
     Write-Log "Installed uvr to $InstallDir\uvr.exe"
 
-    if (-not (Test-InPath $InstallDir)) {
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        $env:Path = "$env:Path;$InstallDir"
-        Write-Log "Added $InstallDir to your user PATH."
-        Write-Log "Open a new terminal for the change to take effect there."
-    } else {
-        $env:Path = "$env:Path;$InstallDir"
-    }
+    Add-ToUserPath -Dir $InstallDir
+    $env:Path = "$env:Path;$InstallDir"
 
     & (Join-Path $InstallDir "uvr.exe") --version
 }
