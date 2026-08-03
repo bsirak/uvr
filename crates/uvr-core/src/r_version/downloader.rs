@@ -92,15 +92,55 @@ const PORTABLE_CDN: &str = "https://cdn.posit.co/r";
 /// Unified version index for the portable builds.
 const VERSIONS_JSON_URL: &str = "https://cdn.posit.co/r/versions.json";
 
-/// macOS and Windows portable builds start at R 4.1.0 — the CDN returns 403
-/// for earlier versions on both platforms (verified: R 4.0.5 → 403 on
-/// `macos` and `windows`, 200 on `manylinux_2_34`). Linux builds have no floor.
-const MAC_WIN_MIN_R_VERSION: (u32, u32, u32) = (4, 1, 0);
+/// Rolling channels the CDN publishes alongside numbered releases, on every
+/// platform and architecture.
+///
+/// They are not versions. `devel` and `next` are rebuilt continuously, so what
+/// a project pins today is not what it resolves to tomorrow — which is why
+/// they are accepted but always labelled, never silently treated as a release.
+pub const ROLLING_CHANNELS: &[&str] = &["devel", "next"];
 
-/// The minimum R version published on the portable CDN for `platform`, or
-/// `None` when the platform has no floor (Linux).
-fn portable_min_r_version(platform: Platform) -> Option<(u32, u32, u32)> {
-    (platform.is_macos() || platform.is_windows()).then_some(MAC_WIN_MIN_R_VERSION)
+/// True when `s` names a rolling channel rather than a release.
+pub fn is_rolling_channel(s: &str) -> bool {
+    ROLLING_CHANNELS.contains(&s)
+}
+
+/// Whether the portable CDN publishes `version` for `platform`.
+///
+/// Not a floor: Windows is not contiguous. The CDN has exactly one build below
+/// 4.1.0 — R 3.6.3 — and nothing else until 4.1.0, so a `>=` bound either
+/// excludes a build that exists (3.6.3) or advertises thirty that do not
+/// (3.0.0–3.6.2, 4.0.0–4.0.5). Verified by HEAD-probing every version in
+/// `versions.json` on both platforms:
+///
+/// ```text
+/// 3.0.0 … 3.6.2   windows=403  macos=403
+/// 3.6.3           windows=200  macos=403
+/// 4.0.0 … 4.0.5   windows=403  macos=403
+/// 4.1.0 …         windows=200  macos=200
+/// ```
+///
+/// Linux is published continuously from 3.0.0 on both architectures.
+fn portable_publishes(platform: Platform, version: (u32, u32, u32)) -> bool {
+    if platform.is_macos() {
+        version >= (4, 1, 0)
+    } else if platform.is_windows() {
+        version == (3, 6, 3) || version >= (4, 1, 0)
+    } else {
+        true
+    }
+}
+
+/// Human-readable summary of what `platform` has published, for the error a
+/// user sees when they ask for something else.
+fn portable_availability(platform: Platform) -> Option<&'static str> {
+    if platform.is_macos() {
+        Some("R 4.1.0 or newer")
+    } else if platform.is_windows() {
+        Some("R 3.6.3, or R 4.1.0 or newer")
+    } else {
+        None
+    }
 }
 
 /// manylinux_2_34 portable builds require glibc >= 2.34.
@@ -622,15 +662,17 @@ pub async fn download_and_install_r(
     // Preflight: portable manylinux builds need glibc >= 2.34.
     ensure_linux_libc_supported()?;
 
-    // Preflight: macOS and Windows portable builds start at R 4.1.0 — fail
-    // with a clear message rather than a bare 403 from the CDN.
-    if let Some(floor) = portable_min_r_version(platform) {
-        if let Some(v) = parse_r_version(version) {
-            if v < floor {
-                let (mj, mn, p) = floor;
+    // Preflight: macOS and Windows publish only part of the version range —
+    // fail with a clear message rather than a bare 403 from the CDN. Rolling
+    // channels have no version to check and are published everywhere.
+    if !is_rolling_channel(version) {
+        if let (Some(available), Some(v)) =
+            (portable_availability(platform), parse_r_version(version))
+        {
+            if !portable_publishes(platform, v) {
                 return Err(UvrError::Other(format!(
-                    "Portable R builds for your platform start at {mj}.{mn}.{p}; R {version} is \
-                     not available. Install {mj}.{mn}.{p} or newer."
+                    "R {version} is not published for your platform. Portable builds here \
+                     cover {available}."
                 )));
             }
         }
@@ -743,14 +785,20 @@ async fn resolve_install_version(
     if is_real_r_version(version) {
         return Ok(version.to_string());
     }
+    // A channel is not resolved to anything: `devel` installs as `devel` and
+    // stays that name on disk, so it is never mistaken for a pinned release.
+    if is_rolling_channel(version) {
+        return Ok(version.to_string());
+    }
     if !crate::r_version::detector::is_plausible_r_version(version) {
         return Err(UvrError::Other(format!(
-            "`{version}` is not a valid R version. Expected `X.Y.Z` (e.g. 4.5.1) or a \
-             partial `X.Y` (e.g. 4.5, which installs the newest 4.5.x)."
+            "`{version}` is not a valid R version. Expected `X.Y.Z` (e.g. 4.5.1), a \
+             partial `X.Y` (e.g. 4.5, which installs the newest 4.5.x), or a rolling \
+             channel (`devel`, `next`)."
         )));
     }
     let available = fetch_available_versions(client, platform).await?;
-    let resolved = pick_newest_matching(&available, version).ok_or_else(|| {
+    let resolved = pick_newest_matching(&available.stable, version).ok_or_else(|| {
         UvrError::Other(format!(
             "No published R version matches {version} for your platform. \
              See `uvr r list --all` for available versions."
@@ -780,8 +828,8 @@ async fn version_not_found_error(
     status: reqwest::StatusCode,
 ) -> UvrError {
     let available_hint = match fetch_available_versions(client, platform).await {
-        Ok(versions) if !versions.is_empty() => {
-            let latest = versions.last().unwrap();
+        Ok(versions) if !versions.stable.is_empty() => {
+            let latest = versions.stable.last().unwrap();
             format!(
                 "\nLatest available for your platform: {latest}.\n\
                  Try `uvr r install {latest}`, or `uvr r list --all` to see every published version."
@@ -873,16 +921,29 @@ fn find_dir_with_r_binary(dir: &Path, depth: usize) -> Option<PathBuf> {
     None
 }
 
+/// What the portable CDN publishes for a platform.
+#[derive(Debug, Clone, Default)]
+pub struct AvailableVersions {
+    /// Numbered releases this platform has, oldest first.
+    pub stable: Vec<String>,
+    /// Rolling channels the index carries — normally `devel` and `next`, on
+    /// every platform, but empty if the index ever stops listing them. Never
+    /// ordered against `stable`: they are labels, not points on the version
+    /// line.
+    pub rolling: Vec<String>,
+}
+
 /// Fetch the list of available R versions from the portable build index
 /// (`cdn.posit.co/r/versions.json`).
 ///
-/// Returns versions sorted oldest-first (e.g. `["4.3.0", "4.3.1", ...]`),
-/// dropping the rolling `next`/`devel` channels. On macOS and Windows the
-/// list is clamped to R >= 4.1.0 (the CDN's floor for both platforms).
+/// Releases come back sorted oldest-first (e.g. `["4.3.0", "4.3.1", ...]`) and
+/// filtered to what this platform publishes; the rolling channels come back
+/// separately so callers can label them instead of ranking them among
+/// releases — `next` is not "newer than 4.6.1", it is a different thing.
 pub async fn fetch_available_versions(
     client: &reqwest::Client,
     platform: Platform,
-) -> Result<Vec<String>> {
+) -> Result<AvailableVersions> {
     let body = client
         .get(VERSIONS_JSON_URL)
         .send()
@@ -897,22 +958,28 @@ pub async fn fetch_available_versions(
         .and_then(|v| v.as_array())
         .ok_or_else(|| UvrError::Other("versions.json missing `r_versions` array".into()))?;
 
-    let floor = portable_min_r_version(platform);
-    let mut versions: Vec<String> = arr
+    let mut stable: Vec<String> = arr
         .iter()
         .filter_map(|v| v.as_str())
-        // Drop rolling channels ("next", "devel") and any non-X.Y.Z label.
+        // Drop rolling channels and any non-X.Y.Z label; they are reported
+        // separately so they can be labelled rather than sorted among releases.
         .filter(|s| is_real_r_version(s))
-        .filter(|s| match floor {
-            Some(f) => parse_r_version(s).map(|v| v >= f).unwrap_or(false),
-            None => true,
-        })
+        .filter(|s| parse_r_version(s).is_some_and(|v| portable_publishes(platform, v)))
         .map(|s| s.to_string())
         .collect();
 
-    versions.sort_by_key(|a| parse_r_version(a));
-    versions.dedup();
-    Ok(versions)
+    stable.sort_by_key(|a| parse_r_version(a));
+    stable.dedup();
+
+    // Only advertise channels the index actually carries, in a stable order.
+    let listed: std::collections::HashSet<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+    let rolling: Vec<String> = ROLLING_CHANNELS
+        .iter()
+        .filter(|c| listed.contains(*c))
+        .map(|c| c.to_string())
+        .collect();
+
+    Ok(AvailableVersions { stable, rolling })
 }
 
 /// Install a portable R build by extracting the archive at `archive` into `dest`.
@@ -1211,21 +1278,74 @@ mod tests {
     fn parse_r_version_orders_correctly() {
         assert_eq!(parse_r_version("4.4.2"), Some((4, 4, 2)));
         assert_eq!(parse_r_version("4.4"), Some((4, 4, 0)));
-        assert!(parse_r_version("4.1.0") >= Some(MAC_WIN_MIN_R_VERSION));
-        assert!(parse_r_version("4.0.5") < Some(MAC_WIN_MIN_R_VERSION));
+        assert!(parse_r_version("4.1.0") > parse_r_version("4.0.5"));
         assert!(parse_r_version("next").is_none());
     }
 
     #[test]
-    fn portable_floor_applies_to_macos_and_windows() {
-        // The CDN 403s pre-4.1.0 builds on macOS AND Windows (verified live);
-        // Linux publishes older versions. Regression guard for the floor
-        // check only gating on is_macos().
-        assert!(portable_min_r_version(Platform::MacOsArm64).is_some());
-        assert!(portable_min_r_version(Platform::MacOsX86_64).is_some());
-        assert!(portable_min_r_version(Platform::WindowsX86_64).is_some());
-        assert!(portable_min_r_version(Platform::LinuxX86_64).is_none());
-        assert!(portable_min_r_version(Platform::LinuxArm64).is_none());
+    fn macos_publishes_from_4_1_0() {
+        for p in [Platform::MacOsArm64, Platform::MacOsX86_64] {
+            assert!(!portable_publishes(p, (4, 0, 5)));
+            assert!(!portable_publishes(p, (3, 6, 3)));
+            assert!(portable_publishes(p, (4, 1, 0)));
+            assert!(portable_publishes(p, (4, 6, 1)));
+        }
+    }
+
+    #[test]
+    fn windows_publishes_3_6_3_and_then_nothing_until_4_1_0() {
+        // The reason this is a predicate and not a floor. A `>= 4.1.0` bound
+        // rejects 3.6.3, which exists; a `>= 3.6.3` bound advertises 4.0.0
+        // through 4.0.5, which do not. Both were verified by HEAD-probing
+        // every version in versions.json.
+        let p = Platform::WindowsX86_64;
+        assert!(portable_publishes(p, (3, 6, 3)));
+        assert!(!portable_publishes(p, (3, 6, 2)));
+        assert!(!portable_publishes(p, (4, 0, 5)));
+        assert!(portable_publishes(p, (4, 1, 0)));
+    }
+
+    #[test]
+    fn linux_publishes_the_whole_range() {
+        for p in [Platform::LinuxX86_64, Platform::LinuxArm64] {
+            assert!(portable_publishes(p, (3, 0, 0)));
+            assert!(portable_publishes(p, (4, 0, 5)));
+            assert!(portable_publishes(p, (4, 6, 1)));
+            assert!(portable_availability(p).is_none());
+        }
+    }
+
+    #[test]
+    fn rolling_channels_are_named_not_versioned() {
+        assert!(is_rolling_channel("devel"));
+        assert!(is_rolling_channel("next"));
+        assert!(!is_rolling_channel("4.6.1"));
+        assert!(!is_rolling_channel("nightly"));
+        // A channel is not a version, so it must never be mistaken for one —
+        // otherwise `4.5` could resolve to it, or it could sort as "latest".
+        for ch in ROLLING_CHANNELS {
+            assert!(!is_real_r_version(ch));
+            assert!(parse_r_version(ch).is_none());
+        }
+    }
+
+    #[test]
+    fn channels_are_published_on_every_platform() {
+        // Unlike releases, the CDN carries devel/next for macOS and Windows
+        // too (HEAD-probed). The preflight must not reject them for platforms
+        // whose numbered range starts later.
+        for p in [
+            Platform::MacOsArm64,
+            Platform::WindowsX86_64,
+            Platform::LinuxX86_64,
+        ] {
+            for ch in ROLLING_CHANNELS {
+                assert!(
+                    parse_r_version(ch).is_none(),
+                    "the preflight only runs on parseable versions, so {ch} passes on {p:?}"
+                );
+            }
+        }
     }
 
     #[test]

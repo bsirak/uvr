@@ -65,6 +65,20 @@ Pure tracking section — fixes and small features land here between tags.
   the real binary, and the probe returns nothing for a freshly unzipped
   install that runs perfectly well.
 
+- `uvr r install devel` and `uvr r install next` work, and say what they are.
+  The rolling channels are published for every platform and architecture, but
+  uvr rejected them as invalid versions and hid them from `uvr r list --all`.
+  They now install under their own name and are labelled `[unstable]` in the
+  listing and warned about at install time — they are rebuilt continuously, so
+  pinning one is not reproducible.
+
+- Windows can install R 3.6.3 again. Availability was modelled as a single
+  floor shared by macOS and Windows (`>= 4.1.0`), but the two platforms differ
+  and Windows is not contiguous: the CDN publishes 3.6.3, nothing from 3.6.4
+  through 4.0.5, then 4.1.0 onwards. A floor either rejected 3.6.3, which
+  exists, or advertised thirty versions that do not, so availability is now a
+  per-platform predicate.
+
 - System dependencies are resolved on RHEL and its rebuilds (#209). uvr asked
   both sysreqs catalogs under the raw `/etc/os-release` identity, which neither
   speaks: Posit's API answers `Unsupported system` for `rhel`/`8.10` but

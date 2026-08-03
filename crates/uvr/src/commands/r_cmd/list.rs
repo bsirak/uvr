@@ -21,7 +21,31 @@ pub async fn run(all: bool) -> Result<()> {
             installations.iter().map(|i| i.version.as_str()).collect();
 
         println!("{}", palette::bold("Available R versions"));
-        for ver in available.iter().rev() {
+
+        // Channels first, and always tagged. They sit above the releases
+        // because they track ahead of them — but they are not "newer than
+        // 4.6.1", so they are never sorted into the list.
+        for ch in &available.rolling {
+            let tag = palette::warn("[unstable]");
+            if installed.contains(ch.as_str()) {
+                println!(
+                    "  {} {} {} {}",
+                    palette::success(ui::glyph::success()),
+                    palette::info(ch),
+                    tag,
+                    palette::dim("[installed]"),
+                );
+            } else {
+                println!(
+                    "  {} {} {}",
+                    palette::dim(ui::glyph::bullet()),
+                    palette::dim(ch),
+                    tag,
+                );
+            }
+        }
+
+        for ver in available.stable.iter().rev() {
             if installed.contains(ver.as_str()) {
                 println!(
                     "  {} {} {}",
@@ -36,6 +60,22 @@ pub async fn run(all: bool) -> Result<()> {
                     palette::dim(ver),
                 );
             }
+        }
+
+        if !available.rolling.is_empty() {
+            // Named from what the index actually carries: if Posit ever drops
+            // one of the channels, a hardcoded pair would name a version that
+            // is not on the list above it.
+            let names = available
+                .rolling
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            ui::hint(format!(
+                "{names} are rebuilt continuously — installing one pins a moving target, \
+                 not a release."
+            ));
         }
         return Ok(());
     }
