@@ -523,7 +523,7 @@
         "api": false,
         "local": true
       },
-      "note": "Alpine 3.20 ships gcc 13.2.1, and R 4.5.1's musllinux_1_2 build records `CC = gcc -std=gnu23` in its Makeconf, which needs gcc >= 14. So R installs and runs, and then every source package fails to compile. 3.21 (gcc 14.2) and 3.22 are unaffected, and the manylinux_2_34 build records a bare `CC = gcc`, so this is musl-only and upstream in rstudio/r-builds — not uvr's code, but uvr's users. Tracked in the issue linked from the `expect` block's PR.",
+      "note": "Alpine 3.20 ships gcc 13.2.1, and R 4.5.1's musllinux_1_2 build records `CC = gcc -std=gnu23` in its Makeconf, which needs gcc >= 14. So R installs and runs, and then every source package fails to compile. 3.21 (gcc 14.2) and 3.22 are unaffected, and the manylinux_2_34 build records a bare `CC = gcc`, so this is musl-only and upstream in rstudio/r-builds — not uvr's code, but uvr's users. Tracked in #231.",
       "expect": {
         "stage": "sysreqs",
         "message": "unrecognized command-line option '-std=gnu23'"
