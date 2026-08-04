@@ -7,6 +7,18 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.4.5 (2026-08-03)
+
+The community release. Four contributors filed thirteen pull requests in
+three days, and this ships nearly all of them: shell activation (the first
+feature from the uv-parity roadmap), a sysreqs subsystem rebuilt end to
+end, binary-repo selection driven by Posit's live catalogue instead of a
+table that went stale, and a conformance suite that runs the real release
+binary natively on twenty-nine Linux distributions — which promptly found
+bugs users had been hitting silently. Three independent adversarial
+reviews ran before this tag; the correctness fixes they turned up are
+included.
+
 - **Package names containing dots no longer install the wrong package**
   (#222). `[dependencies.shiny.i18n]` is parsed by TOML as package `shiny`
   with a sub-key, so uvr silently installed `shiny` and its 30 dependencies
