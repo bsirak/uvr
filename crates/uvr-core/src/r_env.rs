@@ -130,6 +130,14 @@ impl REnv {
             ("R_LIBS", String::new()),
             ("DYLD_LIBRARY_PATH", prepend_lib("DYLD_LIBRARY_PATH")),
             ("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH")),
+            // R reads R_LD_LIBRARY_PATH and prepends it to LD_LIBRARY_PATH in
+            // every subprocess it spawns (byte-compilation children, `Rscript`
+            // calls inside package build scripts, etc.).  Without this, `uvr run`
+            // and a sourced activation script inherit the correct LD_LIBRARY_PATH
+            // for the top-level process but any child R spawned by R itself loses
+            // the module-provided BLAS/LAPACK paths — manifesting as
+            // "libRlapack.so: cannot open shared object file" during lazy loading.
+            ("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH")),
             ("R_ENVIRON", String::new()),
             ("R_ENVIRON_USER", String::new()),
         ]

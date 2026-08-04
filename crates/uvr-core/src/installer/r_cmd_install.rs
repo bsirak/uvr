@@ -414,7 +414,16 @@ impl RCmdInstall {
                 }
             };
             cmd.env("DYLD_LIBRARY_PATH", prepend_lib("DYLD_LIBRARY_PATH"))
-                .env("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH"));
+                .env("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH"))
+                // R reads R_LD_LIBRARY_PATH and prepends it to LD_LIBRARY_PATH
+                // in every subprocess it spawns — including the byte-compilation
+                // child during `R CMD INSTALL`.  Without this, pure-R packages
+                // whose lazy-loading step requires a `.so` that is only reachable
+                // via the module-provided LD_LIBRARY_PATH fail with
+                // "libRlapack.so: cannot open shared object file" even after the
+                // LD_LIBRARY_PATH fix above, because the byte-compilation child
+                // is spawned by R, not by uvr, so it doesn't go through build_cmd.
+                .env("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH"));
 
             // Put the managed R's `bin` on PATH so package build scripts that
             // shell out to `Rscript` / `R` resolve them — e.g. cytolib /
