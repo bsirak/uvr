@@ -92,7 +92,9 @@ pub fn parse(source: &str) -> Result<Option<ScriptHeader>> {
     let mut body = String::new();
     for line in lines {
         // Checked before the comment strip below, which would otherwise
-        // consume the closing fence as a body line reading `//`.
+        // consume the closing fence as a body line: `# ///` less its `# `
+        // prefix is `///`, which TOML would then reject as a syntax error
+        // rather than the block ending cleanly.
         if line.trim_end() == FENCE_CLOSE {
             let header: ScriptHeader =
                 toml::from_str(&body).map_err(|e| UvrError::ScriptHeaderParse(e.to_string()))?;
