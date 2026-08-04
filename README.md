@@ -234,6 +234,7 @@ uvr tree
 | `uvr run --with pkg` | Run with extra packages available (not added to manifest) |
 | `uvr activate` | Print how to activate the project in your shell (`source .uvr/activate`) |
 | `uvr r install <ver>` | Download and install a specific R version to `~/.uvr/r-versions/` |
+| `uvr r install devel` | Install a rolling channel — `devel` or `next`, rebuilt continuously and marked `[unstable]` (not reproducible; don't pin one) |
 | `uvr r list` | Show installed R versions |
 | `uvr r list --all` | Show all available R versions (fetched from the portable build index) |
 | `uvr r use <ver>` | Set R version constraint in `uvr.toml` |

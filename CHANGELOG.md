@@ -7,6 +7,28 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Package names containing dots no longer install the wrong package**
+  (#222). `[dependencies.shiny.i18n]` is parsed by TOML as package `shiny`
+  with a sub-key, so uvr silently installed `shiny` and its 30 dependencies
+  instead; `[dependencies.R.utils]` silently installed nothing at all; and
+  `org.Hs.eg.db` resolved from CRAN rather than Bioconductor. Every one
+  failed silently — the wrong thing installed, with no warning. Unexpected
+  sub-keys are now a parse error that reconstructs the full dotted name by
+  walking the nested table chain, so multi-segment Bioconductor names
+  (`org.Hs.eg.db`, `TxDb.Hsapiens.UCSC.hg38.knownGene`) are quoted and
+  suggested correctly rather than truncated to their first two segments.
+- **One sysreqs API request per sync instead of one per package**: a
+  68-package sync made 68 requests where the batched endpoint answers in
+  one. The batched response also names transitive requirements as separate
+  entries, which fixes a pre-existing misattribution (everything `gert`
+  pulled in was credited to `gert` itself).
+- Bioconductor packages whose declared `SystemRequirements` match no
+  vendored rule are now reported as unverified. Previously, when the
+  sysreqs index fetched successfully, a Bioconductor package that took the
+  local-rules path and matched nothing produced no output at all — neither
+  missing, nor degraded, nor skipped. A check that never happened read as a
+  check that passed.
+
 - uvr no longer tells zypper, pacman and yum-only hosts to run `apt-get`
   (#226). The sysreqs hint probed for `apk` and `dnf` and then *guessed*
   `apt-get`, so on openSUSE the package name was right and the command
@@ -110,8 +132,6 @@ Pure tracking section — fixes and small features land here between tags.
   Coverage still varies behind the mapping — the API serves `rockylinux` 9/10
   but not 8, and rejects `fedora` and `alpine` outright — so the local rules
   remain the backstop for those.
-
-## Unreleased
 
 - **Shell activation** (#177–#180): `source .uvr/activate` puts the project's
   managed R and isolated library into the current shell, so a bare `R` or

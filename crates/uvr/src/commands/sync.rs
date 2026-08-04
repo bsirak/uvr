@@ -984,6 +984,25 @@ async fn install_from_lockfile_with_r(
                             "Install build prerequisites manually (e.g. libxml2-dev, libcurl-dev, libssl-dev) if source builds fail.",
                         );
                         eprintln!();
+                    } else if check.missing.is_empty() && check.local_unresolved > 0 {
+                        // The index fetch itself was fine, so neither flag
+                        // above is set — but some packages took the local
+                        // route anyway (Bioc always does, #202) and declared
+                        // requirements no vendored rule matched. Saying
+                        // nothing here would report a check that never
+                        // happened as a check that passed.
+                        eprintln!();
+                        ui::warn_block(
+                            &format!(
+                                "System dependencies unverified for {} package(s)",
+                                check.local_unresolved
+                            ),
+                            vec![
+                                "They declare SystemRequirements that no vendored rule matched, and Posit's sysreqs API doesn't cover them (it is CRAN-only, so Bioconductor packages always take this path).".to_string(),
+                                "They may fail to compile from source if a system library is missing.".to_string(),
+                            ],
+                        );
+                        eprintln!();
                     } else if !check.missing.is_empty() {
                         let missing = &check.missing;
                         let all_pkgs: Vec<&str> = missing

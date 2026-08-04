@@ -378,6 +378,17 @@ pub struct SysReqsCheck {
     /// missing" from "the fallback had nothing to say" — conflating those is
     /// what made a successful Alpine check report itself as skipped.
     pub local_resolved: usize,
+    /// Number of packages that declared `SystemRequirements` but which the
+    /// vendored local rules could not resolve to any system package.
+    ///
+    /// Needed because `unsupported_distro` and `lookup_failed` only describe
+    /// the *index fetch*, and a package can take the local route while that
+    /// fetch succeeds — Bioconductor packages always do (#202), since the
+    /// Posit API is CRAN-only. Without this counter a CRAN+Bioc sync whose
+    /// index fetch worked reported nothing at all for an unresolved Bioc
+    /// requirement: not missing, not degraded, not skipped. Silence there is
+    /// precisely the false confidence this subsystem exists to prevent.
+    pub local_unresolved: usize,
 }
 
 /// R package to check sysreqs for.
@@ -501,6 +512,12 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
         .map(|package| SysReq { package })
         .collect();
     if resolved.is_empty() {
+        // Declared requirements that no vendored rule matched. The caller
+        // must be able to say so even when the index fetch succeeded, or a
+        // Bioc package's unresolved requirements pass in total silence.
+        if !sys_req_text.trim().is_empty() {
+            out.local_unresolved += 1;
+        }
         return;
     }
     // Past this point the local rules produced a real answer for this
@@ -1034,6 +1051,69 @@ mod tests {
             out.local_resolved, 1,
             "only the Bioc package (Rhtslib) should have gone through the local rules"
         );
+    }
+
+    #[test]
+    fn an_unresolved_bioc_requirement_is_counted_even_when_the_index_succeeded() {
+        // The silent-hole case: the index fetch works (so neither
+        // lookup_failed nor unsupported_distro is set), a Bioc package
+        // takes the local route as it always must, and no vendored rule
+        // matches its declared requirements. Nothing lands in `missing`,
+        // nothing increments `local_resolved` — so without this counter the
+        // caller has no signal at all and reports a check that never
+        // happened as one that passed.
+        let mut index = HashMap::new();
+        index.insert(
+            "curl".to_string(),
+            vec![SysReq {
+                package: "libcurl4-openssl-dev".to_string(),
+            }],
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![
+            PackageSysReqQuery {
+                name: "SomeBiocPkg".to_string(),
+                // Deliberately unmatchable by any vendored rule.
+                system_requirements: Some("Frobnicator Toolkit (>= 9.9)".to_string()),
+                bioc: true,
+            },
+            PackageSysReqQuery {
+                name: "curl".to_string(),
+                system_requirements: None,
+                bioc: false,
+            },
+        ];
+        apply_index(&mut out, &packages, Some(&index), "ubuntu-22.04");
+        assert_eq!(out.local_resolved, 0);
+        assert_eq!(
+            out.local_unresolved, 1,
+            "an unmatched declared requirement must be counted, not silently dropped"
+        );
+        assert!(!out.lookup_failed, "the index fetch itself was fine");
+        assert!(!out.unsupported_distro);
+    }
+
+    #[test]
+    fn packages_declaring_nothing_are_not_counted_as_unresolved() {
+        // The counter must mean "we couldn't answer a question that was
+        // asked", not "no question was asked" — otherwise every ordinary
+        // pure-R Bioc package would trip the warning.
+        let mut out = SysReqsCheck::default();
+        let packages = vec![
+            PackageSysReqQuery {
+                name: "PureBiocPkg".to_string(),
+                system_requirements: None,
+                bioc: true,
+            },
+            PackageSysReqQuery {
+                name: "BlankReqs".to_string(),
+                system_requirements: Some("   ".to_string()),
+                bioc: true,
+            },
+        ];
+        apply_index(&mut out, &packages, None, "ubuntu-22.04");
+        assert_eq!(out.local_unresolved, 0);
+        assert_eq!(out.local_resolved, 0);
     }
 
     #[test]

@@ -85,9 +85,12 @@ pub type Result<T> = std::result::Result<T, UvrError>;
 /// Certificate failures additionally get a pointer to the fix, since
 /// "unknown issuer" is not self-explanatory to most users.
 fn describe_network_error(err: &reqwest::Error) -> String {
+    // Depth cap: the chain comes from the local networking stack rather
+    // than remote input, so this is belt-and-braces, not a live risk.
+    const MAX_DEPTH: usize = 8;
     let mut parts = vec![err.to_string()];
     let mut source = std::error::Error::source(err);
-    while let Some(cause) = source {
+    while let Some(cause) = source.filter(|_| parts.len() < MAX_DEPTH) {
         let text = cause.to_string();
         // Skip layers that just restate what we already printed.
         if !parts.iter().any(|p| p.contains(&text)) {
@@ -104,15 +107,16 @@ fn describe_network_error(err: &reqwest::Error) -> String {
 /// than baking a multi-line hint into `Display` — these errors are often
 /// embedded mid-sentence in a larger warning.
 pub fn looks_like_certificate_failure(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    [
-        "certificate",
-        "unknownissuer",
-        "cert verify",
-        "tls handshake",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    let lower = message.to_ascii_lowercase();
+    // Deliberately NOT "tls handshake": that is rustls' generic message for
+    // any connection closed before the handshake completes — a firewall
+    // blocking the port, a protocol mismatch, or nothing listening on TLS
+    // all produce it. Routing those to "install your CA certificate" sends
+    // the user to fix the wrong thing, which is the same failure this
+    // function exists to prevent, pointed the other way.
+    ["certificate", "unknownissuer", "cert verify", "certverify"]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 #[cfg(test)]
@@ -125,7 +129,6 @@ mod tests {
         // untrusted CA — each must be distinguishable from being offline.
         for msg in [
             "error sending request: invalid peer certificate: UnknownIssuer",
-            "tls handshake eof",
             "invalid peer certificate: Expired",
             "cert verify failed",
         ] {
@@ -142,6 +145,9 @@ mod tests {
             "dns error: failed to lookup address information",
             "operation timed out",
             "connection reset by peer (os error 104)",
+            // rustls' generic pre-handshake close: a blocked port or a
+            // server not speaking TLS, not necessarily an untrusted CA.
+            "tls handshake eof",
         ] {
             assert!(!looks_like_certificate_failure(msg), "{msg}");
         }
