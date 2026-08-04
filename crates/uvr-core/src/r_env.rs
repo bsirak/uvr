@@ -247,9 +247,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("{k} not exported"))
         };
 
-        let r_lib = PathBuf::from("/opt/R/4.4.2/lib")
-            .to_string_lossy()
-            .into_owned();
+        // Use renv().r_lib_dir() to get the path in the OS-native form
+        // (backslash on Windows, forward-slash elsewhere) so the expected
+        // string matches what vars() actually produces on every platform.
+        let r_lib = renv().r_lib_dir().to_string_lossy().into_owned();
         // R's lib dir is first; the module's BLAS path follows.
         assert_eq!(
             get("LD_LIBRARY_PATH"),
