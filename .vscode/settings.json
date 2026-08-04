@@ -1,0 +1,11 @@
+{
+  "positron.r.customBinaries": [
+    "/usr/local/bin/R"
+  ],
+  "positron.r.customRootFolders": [
+    "/Users/gladkia/.uvr/r-versions"
+  ],
+  "positron.r.interpreters.default": "/usr/local/bin/R",
+  "r.rpath.mac": "/usr/local/bin/R",
+  "r.rterm.mac": "/usr/local/bin/R"
+}

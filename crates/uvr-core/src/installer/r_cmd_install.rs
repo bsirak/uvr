@@ -428,8 +428,8 @@ impl RCmdInstall {
             // suppress `ldpaths`'s correct default and leave `exec/R` unable to
             // find `libR.so`. Only prepend when `libR.so` / `libR.dylib` is
             // actually present in `r_lib_dir`, i.e. we computed the right path.
-            let libr_present = r_lib_dir.join("libR.so").exists()
-                || r_lib_dir.join("libR.dylib").exists();
+            let libr_present =
+                r_lib_dir.join("libR.so").exists() || r_lib_dir.join("libR.dylib").exists();
             if libr_present {
                 cmd.env("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH"));
             }
