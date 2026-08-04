@@ -7,6 +7,25 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **A script can carry its own dependencies and run anywhere** (#181). An
+  `.R` file that opens with a `# /// script` … `# ///` comment block listing
+  package names now runs standalone — `uvr run analysis.R` in any directory,
+  with no project, no `uvr.toml` and no setup. The packages are provisioned
+  into an isolated ephemeral environment, cached and reused across runs of
+  the same header, so sending someone the file is enough. This is the R
+  analog of Python's PEP 723, and the first slice of it: plain package names
+  only. Version constraints, Bioconductor and git sources (#182), an `r`
+  version pin (#183), and `uvr add --script` (#184) follow — a header using
+  any of them is rejected or reported rather than quietly misread.
+
+  Standalone means standalone: a headered script ignores the surrounding
+  project's library, its R constraint, any `.r-version` pin walked up from
+  the working directory, and the startup profile that would otherwise put
+  the project library back on the search path. Without all four the same
+  file would resolve differently depending on which directory it was run
+  from, which is the one thing it exists to avoid. Scripts with no header
+  are untouched.
+
 ## v0.4.5 (2026-08-03)
 
 The community release. Four contributors filed thirteen pull requests in

@@ -11,6 +11,7 @@ pub mod r_env;
 pub mod r_version;
 pub mod registry;
 pub mod resolver;
+pub mod script_header;
 pub mod signal;
 pub mod sysreqs;
 pub mod sysreqs_rules;
