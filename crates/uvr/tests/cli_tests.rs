@@ -877,16 +877,26 @@ fn script_dir(source: &str) -> TempDir {
     dir
 }
 
-/// A path in the form R prints it.
+/// An R script that reports whether the *project* library is on the search
+/// path, printing `LINKED` or `NOT_LINKED`.
 ///
-/// R reports `.libPaths()` with forward slashes on every platform, including
-/// Windows, where `Path` renders backslashes. Comparing the two directly makes
-/// a `contains` assertion fail on Windows and — far worse — makes a
-/// `!contains` assertion pass there no matter what, so an isolation test would
-/// silently stop testing anything.
-fn as_r_prints_it(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
+/// The comparison happens inside R rather than by matching the path in Rust,
+/// because a Rust-side `String::contains` cannot survive Windows: R prints
+/// `.libPaths()` with forward slashes where `Path` renders backslashes, and
+/// GitHub's Windows runners point `TEMP` at the 8.3 short form
+/// (`C:\Users\RUNNER~1\…`) while R resolves and prints the long form
+/// (`C:/Users/runneradmin/…`). Two different spellings of one directory.
+///
+/// Getting this wrong is worse than a red test: a `!contains` assertion that
+/// can never match passes vacuously, so the isolation check would quietly
+/// stop checking anything on the one platform where the profile suppression
+/// is spelled differently.
+const REPORTS_PROJECT_LIB_LINKAGE: &str = r#"
+lib <- normalizePath(file.path(getwd(), ".uvr", "library"), winslash = "/", mustWork = FALSE)
+paths <- normalizePath(.libPaths(), winslash = "/", mustWork = FALSE)
+cat(if (lib %in% paths) "LINKED" else "NOT_LINKED", "\n")
+cat(paths, sep = "\n")
+"#;
 
 #[test]
 fn test_unterminated_script_header_is_a_hard_error() {
@@ -1063,7 +1073,7 @@ fn test_headered_script_does_not_inherit_the_project_library() {
     let dir = init_project("isolation");
     fs::write(
         dir.path().join("script.R"),
-        "# /// script\n# dependencies = []\n# ///\ncat(.libPaths(), sep = \"\\n\")\n",
+        format!("# /// script\n# dependencies = []\n# ///\n{REPORTS_PROJECT_LIB_LINKAGE}"),
     )
     .unwrap();
 
@@ -1074,9 +1084,8 @@ fn test_headered_script_does_not_inherit_the_project_library() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
 
-    let project_lib = as_r_prints_it(&dir.path().join(".uvr").join("library"));
     assert!(
-        !stdout.contains(&project_lib),
+        stdout.contains("NOT_LINKED"),
         "the project library leaked into a headered script's search path:\n{stdout}"
     );
     assert!(
@@ -1097,7 +1106,7 @@ fn test_headerless_script_still_gets_the_project_library() {
     let dir = init_project("linked");
     fs::write(
         dir.path().join("script.R"),
-        "cat(.libPaths(), sep = \"\\n\")\n",
+        REPORTS_PROJECT_LIB_LINKAGE.trim_start(),
     )
     .unwrap();
 
@@ -1108,9 +1117,8 @@ fn test_headerless_script_still_gets_the_project_library() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
 
-    let project_lib = as_r_prints_it(&dir.path().join(".uvr").join("library"));
     assert!(
-        stdout.contains(&project_lib),
+        stdout.contains("LINKED") && !stdout.contains("NOT_LINKED"),
         "the project library is no longer linked for an ordinary run:\n{stdout}"
     );
 }
