@@ -877,6 +877,17 @@ fn script_dir(source: &str) -> TempDir {
     dir
 }
 
+/// A path in the form R prints it.
+///
+/// R reports `.libPaths()` with forward slashes on every platform, including
+/// Windows, where `Path` renders backslashes. Comparing the two directly makes
+/// a `contains` assertion fail on Windows and — far worse — makes a
+/// `!contains` assertion pass there no matter what, so an isolation test would
+/// silently stop testing anything.
+fn as_r_prints_it(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 #[test]
 fn test_unterminated_script_header_is_a_hard_error() {
     // No closing `# ///` at all: every declared dependency would be silently
@@ -1063,9 +1074,9 @@ fn test_headered_script_does_not_inherit_the_project_library() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
 
-    let project_lib = dir.path().join(".uvr").join("library");
+    let project_lib = as_r_prints_it(&dir.path().join(".uvr").join("library"));
     assert!(
-        !stdout.contains(&*project_lib.to_string_lossy()),
+        !stdout.contains(&project_lib),
         "the project library leaked into a headered script's search path:\n{stdout}"
     );
     assert!(
@@ -1097,9 +1108,9 @@ fn test_headerless_script_still_gets_the_project_library() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
 
-    let project_lib = dir.path().join(".uvr").join("library");
+    let project_lib = as_r_prints_it(&dir.path().join(".uvr").join("library"));
     assert!(
-        stdout.contains(&*project_lib.to_string_lossy()),
+        stdout.contains(&project_lib),
         "the project library is no longer linked for an ordinary run:\n{stdout}"
     );
 }
