@@ -394,8 +394,45 @@ impl RCmdInstall {
                 cmd.env("PATH", format!("{path_ext}{existing_path}"));
             }
         } else {
-            cmd.env("DYLD_LIBRARY_PATH", r_lib_str.as_ref())
-                .env("LD_LIBRARY_PATH", r_lib_str.as_ref());
+            // Prepend R's own lib dir to (DY)LD_LIBRARY_PATH rather than
+            // replacing it. The parent process may carry load-bearing entries
+            // — e.g. on HPC clusters where BLAS/LAPACK are provided as
+            // separate shared libraries (OpenBLAS, MKL, FlexiBLAS) whose paths
+            // are set by the environment module system. Clobbering that value
+            // causes R CMD INSTALL's lazy-loading phase to fail with
+            // "libRlapack.so: cannot open shared object file" even when the
+            // library is available under a module-provided path.
+            //
+            // This mirrors how the PATH extension is handled above (line
+            // `format!("{bin}:{p}")`): prepend, don't replace.
+            let prepend_lib = |var: &str| -> String {
+                match std::env::var(var) {
+                    Ok(existing) if !existing.is_empty() => {
+                        format!("{r_lib_str}:{existing}")
+                    }
+                    _ => r_lib_str.to_string(),
+                }
+            };
+            cmd.env("DYLD_LIBRARY_PATH", prepend_lib("DYLD_LIBRARY_PATH"))
+                .env("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH"));
+            // R reads R_LD_LIBRARY_PATH and prepends it to LD_LIBRARY_PATH in
+            // every subprocess it spawns — including the byte-compilation child
+            // during `R CMD INSTALL`. On HPC clusters this is the only way to
+            // pass the module-provided BLAS/LAPACK paths into R's own children.
+            //
+            // However, the R wrapper script (`bin/R`) sources `etc/ldpaths`
+            // which sets `R_LD_LIBRARY_PATH = ${R_HOME}/lib` when it is not
+            // already set. On Posit portable builds the correct `R_HOME/lib` is
+            // a subdirectory of `r_lib_dir` (e.g. `lib/R/lib/`), so setting
+            // `R_LD_LIBRARY_PATH` to `r_lib_dir` before `ldpaths` runs would
+            // suppress `ldpaths`'s correct default and leave `exec/R` unable to
+            // find `libR.so`. Only prepend when `libR.so` / `libR.dylib` is
+            // actually present in `r_lib_dir`, i.e. we computed the right path.
+            let libr_present =
+                r_lib_dir.join("libR.so").exists() || r_lib_dir.join("libR.dylib").exists();
+            if libr_present {
+                cmd.env("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH"));
+            }
 
             // Put the managed R's `bin` on PATH so package build scripts that
             // shell out to `Rscript` / `R` resolve them — e.g. cytolib /
