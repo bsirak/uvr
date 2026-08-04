@@ -46,6 +46,12 @@ jobs:
   bench:
     name: Run benchmark in Docker
     runs-on: ubuntu-latest
+    # A healthy run (binaries served for every tool — the Dockerfile's
+    # HTTPUserAgent line is what guarantees that) completes in well under
+    # an hour. Fail fast and loud rather than crawling to GitHub's
+    # 360-minute kill, which is how this workflow silently died on five
+    # consecutive tags while everything else stayed green.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 

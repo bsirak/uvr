@@ -80,7 +80,15 @@ ARG PPM_SNAPSHOT=2025-04-01
 # fails LOUDLY — preferred over silent version drift. Bumping the
 # PPM_SNAPSHOT arg is an explicit "we're updating the comparison
 # baseline" act, not something that drifts under us.
-RUN printf 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/bookworm/%s"))\n' \
+# The HTTPUserAgent line is load-bearing: P3M only serves Linux *binaries*
+# when the User-Agent advertises an R version; with R's default agent it
+# silently serves source tarballs instead. Without this, install.packages
+# and renv compile every package from source — the ggplot2 scenario alone
+# took the comparison tools ~5 hours, and the workflow died at GitHub's
+# 360-minute ceiling on every tag it ever ran on. The bench then wasn't
+# comparing installers; it was comparing uvr's binary installs against
+# everyone else's compile farm.
+RUN printf 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/bookworm/%s"))\noptions(HTTPUserAgent = sprintf("R/%%s R (%%s)", getRversion(), paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))\n' \
         "${PPM_SNAPSHOT}" >> /usr/local/lib/R/etc/Rprofile.site \
  && R -e "install.packages(c('pak','renv'), Ncpus = parallel::detectCores())"
 
