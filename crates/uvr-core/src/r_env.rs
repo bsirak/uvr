@@ -98,12 +98,38 @@ impl REnv {
     /// variables is what actually does the work here.
     pub fn vars(&self) -> Vec<(&'static str, String)> {
         let r_lib_dir = self.r_lib_dir().to_string_lossy().into_owned();
+
+        // Prepend R's own lib dir to (DY)LD_LIBRARY_PATH rather than replacing
+        // it.  On HPC clusters BLAS/LAPACK are provided by the environment module
+        // system (OpenBLAS, MKL, FlexiBLAS) and their paths are already on
+        // LD_LIBRARY_PATH.  Clobbering that value causes lazy-loading failures
+        // for packages whose `.so` files link against `libRblas.so` /
+        // `libRlapack.so` — the install succeeds but `library()` fails.  This
+        // is the same fix applied to `R CMD INSTALL` in `build_cmd`; `uvr run`
+        // and `uvr activate` must be consistent so the environment produced by
+        // a successful `uvr sync` can actually be used.
+        //
+        // Guard: if `r_lib_dir` is empty (malformed R binary path with no
+        // parent), skip it entirely — a leading empty component would resolve to
+        // the current working directory, which is worse than nothing.
+        let prepend_lib = |var: &'static str| -> String {
+            if r_lib_dir.is_empty() {
+                return std::env::var(var).unwrap_or_default();
+            }
+            match std::env::var(var) {
+                Ok(existing) if !existing.is_empty() => {
+                    format!("{r_lib_dir}{PATH_SEP}{existing}")
+                }
+                _ => r_lib_dir.clone(),
+            }
+        };
+
         vec![
             ("R_LIBS_USER", self.r_libs_user()),
             ("R_LIBS_SITE", String::new()),
             ("R_LIBS", String::new()),
-            ("DYLD_LIBRARY_PATH", r_lib_dir.clone()),
-            ("LD_LIBRARY_PATH", r_lib_dir),
+            ("DYLD_LIBRARY_PATH", prepend_lib("DYLD_LIBRARY_PATH")),
+            ("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH")),
             ("R_ENVIRON", String::new()),
             ("R_ENVIRON_USER", String::new()),
         ]
@@ -173,6 +199,11 @@ mod tests {
 
     #[test]
     fn vars_isolate_the_project_from_system_libraries() {
+        let _env = crate::env_vars::env_lock();
+        // Clear module-provided paths so the test is deterministic.
+        std::env::remove_var("LD_LIBRARY_PATH");
+        std::env::remove_var("DYLD_LIBRARY_PATH");
+
         let vars = renv().vars();
         let get = |k: &str| {
             vars.iter()
@@ -189,10 +220,73 @@ mod tests {
         // user whose ~/.Renviron sets R_LIBS_USER silently gets their own
         // library instead of the project's — verified against real R.
         assert_eq!(get("R_ENVIRON_USER"), "");
+        // With no inherited value, the lib dir is set directly — no leading colon.
         let lib = PathBuf::from("/opt/R/4.4.2").join("lib");
         let lib = lib.to_string_lossy();
-        assert_eq!(get("DYLD_LIBRARY_PATH"), lib);
-        assert_eq!(get("LD_LIBRARY_PATH"), lib);
+        assert_eq!(get("DYLD_LIBRARY_PATH"), lib.as_ref());
+        assert_eq!(get("LD_LIBRARY_PATH"), lib.as_ref());
+    }
+
+    #[test]
+    fn vars_prepend_r_lib_dir_to_inherited_ld_library_path() {
+        // HPC clusters set LD_LIBRARY_PATH to expose BLAS/LAPACK shared
+        // libraries (OpenBLAS, MKL, FlexiBLAS).  `vars()` must prepend R's
+        // lib dir rather than replacing the value, so the module-provided
+        // libraries remain visible to R CMD INSTALL subprocesses, `uvr run`,
+        // and activation scripts.
+        let _env = crate::env_vars::env_lock();
+        let module_blas = "/apps/rocs/OpenBLAS/lib";
+        std::env::set_var("LD_LIBRARY_PATH", module_blas);
+        std::env::remove_var("DYLD_LIBRARY_PATH");
+
+        let vars = renv().vars();
+        let get = |k: &str| {
+            vars.iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("{k} not exported"))
+        };
+
+        let r_lib = PathBuf::from("/opt/R/4.4.2/lib")
+            .to_string_lossy()
+            .into_owned();
+        // R's lib dir is first; the module's BLAS path follows.
+        assert_eq!(
+            get("LD_LIBRARY_PATH"),
+            format!("{r_lib}{PATH_SEP}{module_blas}"),
+            "LD_LIBRARY_PATH must prepend, not replace"
+        );
+        // DYLD_LIBRARY_PATH had no inherited value — just R's lib dir.
+        assert_eq!(get("DYLD_LIBRARY_PATH"), r_lib);
+    }
+
+    #[test]
+    fn vars_empty_r_lib_dir_does_not_produce_leading_separator() {
+        // A malformed R binary path with no parent gives an empty r_lib_dir.
+        // The result must not start with PATH_SEP — a leading empty component
+        // resolves to the current directory for the dynamic linker, which is
+        // a security hazard.
+        let _env = crate::env_vars::env_lock();
+        let inherited = "/some/blas/lib";
+        std::env::set_var("LD_LIBRARY_PATH", inherited);
+        std::env::set_var("DYLD_LIBRARY_PATH", inherited);
+
+        let env = REnv {
+            r_binary: PathBuf::from("R"), // no parent → r_lib_dir() is empty
+            ..renv()
+        };
+        let vars = env.vars();
+        let get = |k: &str| {
+            vars.iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("{k} not exported"))
+        };
+        let ld = get("LD_LIBRARY_PATH");
+        assert!(
+            !ld.starts_with(PATH_SEP),
+            "LD_LIBRARY_PATH must not start with separator, got: {ld:?}"
+        );
     }
 
     #[test]
