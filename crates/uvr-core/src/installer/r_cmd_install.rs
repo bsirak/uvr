@@ -414,16 +414,25 @@ impl RCmdInstall {
                 }
             };
             cmd.env("DYLD_LIBRARY_PATH", prepend_lib("DYLD_LIBRARY_PATH"))
-                .env("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH"))
-                // R reads R_LD_LIBRARY_PATH and prepends it to LD_LIBRARY_PATH
-                // in every subprocess it spawns — including the byte-compilation
-                // child during `R CMD INSTALL`.  Without this, pure-R packages
-                // whose lazy-loading step requires a `.so` that is only reachable
-                // via the module-provided LD_LIBRARY_PATH fail with
-                // "libRlapack.so: cannot open shared object file" even after the
-                // LD_LIBRARY_PATH fix above, because the byte-compilation child
-                // is spawned by R, not by uvr, so it doesn't go through build_cmd.
-                .env("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH"));
+                .env("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH"));
+            // R reads R_LD_LIBRARY_PATH and prepends it to LD_LIBRARY_PATH in
+            // every subprocess it spawns — including the byte-compilation child
+            // during `R CMD INSTALL`. On HPC clusters this is the only way to
+            // pass the module-provided BLAS/LAPACK paths into R's own children.
+            //
+            // However, the R wrapper script (`bin/R`) sources `etc/ldpaths`
+            // which sets `R_LD_LIBRARY_PATH = ${R_HOME}/lib` when it is not
+            // already set. On Posit portable builds the correct `R_HOME/lib` is
+            // a subdirectory of `r_lib_dir` (e.g. `lib/R/lib/`), so setting
+            // `R_LD_LIBRARY_PATH` to `r_lib_dir` before `ldpaths` runs would
+            // suppress `ldpaths`'s correct default and leave `exec/R` unable to
+            // find `libR.so`. Only prepend when `libR.so` / `libR.dylib` is
+            // actually present in `r_lib_dir`, i.e. we computed the right path.
+            let libr_present = r_lib_dir.join("libR.so").exists()
+                || r_lib_dir.join("libR.dylib").exists();
+            if libr_present {
+                cmd.env("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH"));
+            }
 
             // Put the managed R's `bin` on PATH so package build scripts that
             // shell out to `Rscript` / `R` resolve them — e.g. cytolib /

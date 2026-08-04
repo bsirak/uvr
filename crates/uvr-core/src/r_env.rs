@@ -124,23 +124,38 @@ impl REnv {
             }
         };
 
-        vec![
+        let mut vars = vec![
             ("R_LIBS_USER", self.r_libs_user()),
             ("R_LIBS_SITE", String::new()),
             ("R_LIBS", String::new()),
             ("DYLD_LIBRARY_PATH", prepend_lib("DYLD_LIBRARY_PATH")),
             ("LD_LIBRARY_PATH", prepend_lib("LD_LIBRARY_PATH")),
-            // R reads R_LD_LIBRARY_PATH and prepends it to LD_LIBRARY_PATH in
-            // every subprocess it spawns (byte-compilation children, `Rscript`
-            // calls inside package build scripts, etc.).  Without this, `uvr run`
-            // and a sourced activation script inherit the correct LD_LIBRARY_PATH
-            // for the top-level process but any child R spawned by R itself loses
-            // the module-provided BLAS/LAPACK paths — manifesting as
-            // "libRlapack.so: cannot open shared object file" during lazy loading.
-            ("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH")),
             ("R_ENVIRON", String::new()),
             ("R_ENVIRON_USER", String::new()),
-        ]
+        ];
+
+        // R reads R_LD_LIBRARY_PATH and prepends it to LD_LIBRARY_PATH in
+        // every subprocess it spawns (byte-compilation children, `Rscript`
+        // calls inside package build scripts, etc.).  Without this, `uvr run`
+        // and a sourced activation script inherit the correct LD_LIBRARY_PATH
+        // for the top-level process but any child R spawned by R itself loses
+        // the module-provided BLAS/LAPACK paths — manifesting as
+        // "libRlapack.so: cannot open shared object file" during lazy loading.
+        //
+        // Guard: only set R_LD_LIBRARY_PATH when libR.so / libR.dylib is
+        // actually present in r_lib_dir.  On Posit portable builds the R
+        // wrapper scripts sources `etc/ldpaths`, which sets `R_LD_LIBRARY_PATH
+        // = ${R_HOME}/lib` when it is **not already set**.  Since r_lib_dir is
+        // `<install_root>/lib` and the correct R_HOME/lib is
+        // `<install_root>/lib/R/lib`, pre-setting R_LD_LIBRARY_PATH to the
+        // wrong path would suppress ldpaths's correct default and leave exec/R
+        // unable to find libR.so at startup.
+        let r_lib_path = std::path::Path::new(r_lib_dir.as_str());
+        if r_lib_path.join("libR.so").exists() || r_lib_path.join("libR.dylib").exists() {
+            vars.push(("R_LD_LIBRARY_PATH", prepend_lib("R_LD_LIBRARY_PATH")));
+        }
+
+        vars
     }
 }
 
@@ -306,5 +321,24 @@ mod tests {
         };
         assert_eq!(env.r_bin_dir(), PathBuf::from(""));
         assert_eq!(env.r_lib_dir(), PathBuf::from(""));
+    }
+
+    #[test]
+    fn vars_omits_r_ld_library_path_when_libr_absent() {
+        // On Posit portable builds, r_lib_dir() resolves to <install_root>/lib,
+        // but libR.so lives in <install_root>/lib/R/lib/ — one level deeper.
+        // If uvr sets R_LD_LIBRARY_PATH to the wrong path, R's own `ldpaths`
+        // script cannot supply the correct default (it only fires when the var is
+        // unset), and exec/R fails to load.  Guard: omit R_LD_LIBRARY_PATH when
+        // libR.so / libR.dylib is not present in r_lib_dir so that ldpaths
+        // remains free to set it correctly.
+        let env = renv(); // r_binary = /opt/R/4.4.2/bin/R; r_lib_dir = /opt/R/4.4.2/lib (no libR.so there)
+        let vars = env.vars();
+        // R_LD_LIBRARY_PATH must NOT be present when the lib file is absent.
+        let has_r_ld = vars.iter().any(|(k, _)| *k == "R_LD_LIBRARY_PATH");
+        assert!(
+            !has_r_ld,
+            "R_LD_LIBRARY_PATH should be omitted when libR.so is not in r_lib_dir"
+        );
     }
 }
