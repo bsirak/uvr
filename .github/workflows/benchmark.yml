@@ -37,7 +37,7 @@ on:
       runs:
         description: "Number of timed runs per scenario"
         required: false
-        default: "5"
+        default: "3"
 
 permissions:
   contents: read
