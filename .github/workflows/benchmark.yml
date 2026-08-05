@@ -46,12 +46,13 @@ jobs:
   bench:
     name: Run benchmark in Docker
     runs-on: ubuntu-latest
-    # A healthy run (binaries served for every tool — the Dockerfile's
-    # HTTPUserAgent line is what guarantees that) completes in well under
-    # an hour. Fail fast and loud rather than crawling to GitHub's
+    # Budget: ~2.5h measured at 3 runs/tier with every tool on P3M
+    # binaries (the Dockerfile's HTTPUserAgent line guarantees that; the
+    # tidyverse scenario's serial install.packages runs dominate). The cap
+    # exists so a regression fails loudly rather than crawling to GitHub's
     # 360-minute kill, which is how this workflow silently died on five
     # consecutive tags while everything else stayed green.
-    timeout-minutes: 90
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +61,11 @@ jobs:
         run: |
           echo "r_version=${{ inputs.r_version || '4.5.3' }}" >> "$GITHUB_OUTPUT"
           echo "ppm_snapshot=${{ inputs.ppm_snapshot || '2025-04-01' }}" >> "$GITHUB_OUTPUT"
-          echo "runs=${{ inputs.runs || '5' }}" >> "$GITHUB_OUTPUT"
+          # 3 runs, not 5: with install.packages' serial pace on the
+          # 99-package tidyverse scenario, 5 runs cannot fit any sane budget
+          # (two validation runs proved it). Medians over 3 are stable for
+          # these effect sizes — the gaps are 5x-50x, not 5%.
+          echo "runs=${{ inputs.runs || '3' }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
