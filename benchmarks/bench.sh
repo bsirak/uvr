@@ -559,7 +559,15 @@ for scenario in $SCENARIOS; do
         bench_install_packages "$MANIFEST" "$scenario" "$tier"
         if $HAS_PAK; then
             bench_pak "$MANIFEST" "$scenario" "$tier"
-            bench_pak_lockfile "$MANIFEST" "$scenario" "$tier"
+            # Extended-only: pak's lockfile_install path shows a deterministic
+            # ~549s/run anomaly in the container (~50x plain pak on the same
+            # package — timeout-shaped, under investigation) and its numbers
+            # aren't in the README table. Every tag paying 45+ min/scenario
+            # for an unpublished figure is how this workflow spent five
+            # releases dying at the CI ceiling.
+            if [ "${BENCH_EXTENDED:-0}" = "1" ]; then
+                bench_pak_lockfile "$MANIFEST" "$scenario" "$tier"
+            fi
         fi
         if $HAS_RENV; then bench_renv "$MANIFEST" "$scenario" "$tier"; fi
 
