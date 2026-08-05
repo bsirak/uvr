@@ -64,6 +64,7 @@ function Get-ExpectedHash {
     }
     $line = Select-String -Path $sumsPath -Pattern ([Regex]::Escape($Asset)) | Select-Object -First 1
     if (-not $line) {
+        Write-Log "Warning: no checksum entry for $Asset, skipping checksum verification"
         return $null
     }
     return ($line.Line -split "\s+")[0]
