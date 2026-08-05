@@ -18,8 +18,8 @@ A fast R package and project manager, written in Rust.
 
 2.  Windows
 
-    ``` sh
-    powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/nbafrank/uvr/main/install.ps1 | iex"
+    ``` powershell
+    irm https://raw.githubusercontent.com/nbafrank/uvr/main/install.ps1 | iex
     ```
 
 Here's a following demo of `uvr`: 
