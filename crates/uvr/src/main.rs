@@ -165,7 +165,8 @@ async fn run() -> Result<()> {
         }
         Commands::R(r_args) => match r_args.command {
             Some(RCommands::Install(args)) => {
-                commands::r_cmd::install::run(args.version, args.distribution).await?;
+                commands::r_cmd::install::run(args.version, args.distribution, args.install_dir)
+                    .await?;
             }
             Some(RCommands::Uninstall(args)) => {
                 commands::r_cmd::uninstall::run(args.version)?;

@@ -617,20 +617,28 @@ pub fn user_agent(info: &HostInfo) -> String {
     )
 }
 
-/// Download and extract R to `~/.uvr/r-versions/<version>/`.
+/// Download and extract R to `<r-versions>/<version>/`.
 ///
 /// `version` may be partial (`4.5`): it is resolved to the newest published
 /// matching version before install, so the install directory is always a
 /// full `X.Y.Z` that pin resolution and `r list --all` can match (#170).
+///
+/// The r-versions directory is `install_root` when given (`--install-dir`,
+/// which wins over the env var per uv convention, #89), else
+/// `UVR_R_INSTALL_DIR` / `~/.uvr/r-versions`.
 pub async fn download_and_install_r(
     client: &reqwest::Client,
     version: &str,
     platform: Platform,
+    install_root: Option<&Path>,
 ) -> Result<PathBuf> {
     let version = &resolve_install_version(client, version, platform).await?;
-    let install_dir = crate::env_vars::r_install_dir()
-        .ok_or_else(|| UvrError::Other("Cannot determine r-versions directory".into()))?
-        .join(version);
+    let install_dir = match install_root {
+        Some(root) => root.to_path_buf(),
+        None => crate::env_vars::r_install_dir()
+            .ok_or_else(|| UvrError::Other("Cannot determine r-versions directory".into()))?,
+    }
+    .join(version);
 
     let r_binary_name = if platform.is_windows() { "R.exe" } else { "R" };
     let r_binary = install_dir.join("bin").join(r_binary_name);

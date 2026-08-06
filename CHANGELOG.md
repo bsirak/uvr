@@ -7,6 +7,11 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`uvr r install --install-dir <DIR>`** (#89) installs R into a chosen
+  r-versions directory for that one invocation, taking precedence over
+  `UVR_R_INSTALL_DIR` the way uv's flags beat their env vars. The env var
+  remains the way to make every command look there.
+
 ## v0.4.5 (2026-08-03)
 
 The community release. Four contributors filed thirteen pull requests in

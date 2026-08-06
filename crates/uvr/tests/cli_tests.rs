@@ -189,6 +189,18 @@ fn test_r_pin_help_works() {
 }
 
 #[test]
+fn test_r_install_advertises_install_dir() {
+    // #89: `--install-dir` overrides UVR_R_INSTALL_DIR for one invocation.
+    // The help text is the discoverable surface of that agreement.
+    uvr_cmd()
+        .args(["r", "install", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--install-dir"))
+        .stdout(predicate::str::contains("UVR_R_INSTALL_DIR"));
+}
+
+#[test]
 fn test_sync_without_lockfile_fails() {
     let dir = init_project("no-lock-test");
     uvr_cmd()
