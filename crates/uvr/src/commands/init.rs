@@ -129,7 +129,8 @@ const RPROFILE_END: &str = "# <<< uvr <<<";
 // file's git history, not in the user-facing snippet.
 const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
 local({
-  lib <- file.path(getwd(), ".uvr", "library")
+  lib <- Sys.getenv("UVR_LIBRARY")
+  if (!nzchar(lib)) lib <- file.path(getwd(), ".uvr", "library")
   lock <- file.path(getwd(), "uvr.lock")
   rver_file <- file.path(getwd(), ".r-version")
   count_locked <- function(path) {
@@ -525,6 +526,16 @@ mod rprofile_tests {
         let existing = RPROFILE_SNIPPET.to_string();
         let new = refresh_uvr_block(&existing, RPROFILE_SNIPPET).unwrap();
         assert_eq!(new, existing);
+    }
+
+    #[test]
+    fn rprofile_snippet_honours_the_library_override() {
+        // #97: an IDE session sources .Rprofile, not uvr — the snippet must
+        // apply the same UVR_LIBRARY-else-project-local rule as
+        // Project::library_path, or `uvr sync` under the override installs
+        // packages RStudio/Positron sessions never see.
+        assert!(RPROFILE_SNIPPET.contains(r#"Sys.getenv("UVR_LIBRARY")"#));
+        assert!(RPROFILE_SNIPPET.contains(r#"file.path(getwd(), ".uvr", "library")"#));
     }
 
     #[test]

@@ -7,6 +7,17 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`UVR_LIBRARY` now applies to the whole project, not just `uvr sync`**
+  (#97). Previously only sync honoured it as an install target, so setting
+  it sent packages to a directory that `uvr run`, `uvr activate`, doctor
+  and IDE sessions never looked at. All of them — including the `.Rprofile`
+  snippet, which refreshes on the next sync — now resolve the library
+  through the same rule: `UVR_LIBRARY` when set, else `.uvr/library/`.
+  This is the machine-local escape hatch for projects living on slow
+  network storage (Azure ML mapped drives and similar), matching
+  `UV_PROJECT_ENVIRONMENT` / `RENV_PATHS_LIBRARY` / `RV_LIBRARY_DIR`.
+  Pruning still never runs against an override target.
+
 ## v0.4.5 (2026-08-03)
 
 The community release. Four contributors filed thirteen pull requests in
