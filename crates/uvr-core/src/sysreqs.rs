@@ -69,14 +69,51 @@ impl PackageManager {
     }
 
     /// Arguments that install the packages appended after them,
-    /// non-interactively. Mirrors `ci/distro-suite.sh`'s `pm_install`.
+    /// non-interactively. Mirrors `ci/distro-suite.sh`'s `pm_install`,
+    /// including zypper's `--gpg-auto-import-keys` — without it a
+    /// `--non-interactive` zypper *declines* an unimported repo signing key
+    /// rather than proceeding, a routine state on fresh openSUSE images.
     pub fn install_args(&self) -> Vec<&'static str> {
         match self {
             Self::Apk => vec!["add"],
             Self::Dnf | Self::Microdnf | Self::Yum => vec!["install", "-y"],
-            Self::Zypper => vec!["--non-interactive", "install", "-y"],
+            Self::Zypper => vec![
+                "--non-interactive",
+                "--gpg-auto-import-keys",
+                "install",
+                "-y",
+            ],
             Self::Pacman => vec!["-S", "--noconfirm", "--needed"],
             Self::AptGet => vec!["install", "-y"],
+        }
+    }
+
+    /// Arguments that refresh the package index, for managers that will
+    /// otherwise report "package not found" on a fresh container that has
+    /// never synced its metadata (openSUSE and Arch base images ship none
+    /// at all). `None` for managers that refresh implicitly on install.
+    pub fn refresh_args(&self) -> Option<Vec<&'static str>> {
+        match self {
+            Self::AptGet => Some(vec!["update"]),
+            Self::Zypper => Some(vec![
+                "--non-interactive",
+                "--gpg-auto-import-keys",
+                "refresh",
+            ]),
+            Self::Pacman => Some(vec!["-Sy"]),
+            Self::Apk => Some(vec!["update"]),
+            // dnf/microdnf/yum refresh expired metadata automatically.
+            Self::Dnf | Self::Microdnf | Self::Yum => None,
+        }
+    }
+
+    /// Environment variables the install command needs to be genuinely
+    /// non-interactive. `-y` answers apt's own prompts but not a maintainer
+    /// script's debconf prompts.
+    pub fn install_env(&self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Self::AptGet => vec![("DEBIAN_FRONTEND", "noninteractive")],
+            _ => vec![],
         }
     }
 
@@ -570,7 +607,7 @@ mod tests {
         // that isn't installed on the host.
         assert_eq!(
             PackageManager::Zypper.install_command(&["libxml2-devel"]),
-            "zypper --non-interactive install -y libxml2-devel"
+            "zypper --non-interactive --gpg-auto-import-keys install -y libxml2-devel"
         );
         assert_eq!(
             PackageManager::Pacman.install_command(&["libxml2"]),

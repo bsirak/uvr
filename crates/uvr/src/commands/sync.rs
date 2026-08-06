@@ -1062,13 +1062,25 @@ async fn install_from_lockfile_with_r(
                             }
                             (true, Some((install_program, install_args))) => {
                                 if confirm_sysreqs_install(&install_cmd_display)? {
+                                    // Refresh the package index first where the
+                                    // manager needs it: fresh openSUSE/Arch
+                                    // containers ship no synced metadata at all,
+                                    // and the install would report "package not
+                                    // found" for packages that exist. Best-effort
+                                    // — a failed refresh still lets the install
+                                    // try (it may have usable cached lists).
+                                    run_sysreqs_refresh();
                                     ui::info(format!("Running: {install_cmd_display}"));
-                                    let status = std::process::Command::new(&install_program)
-                                        .args(&install_args)
-                                        .status()
-                                        .with_context(|| {
-                                            format!("Failed to spawn {install_program}")
-                                        })?;
+                                    let mut cmd = std::process::Command::new(&install_program);
+                                    cmd.args(&install_args);
+                                    if let Some(pm) = uvr_core::sysreqs::PackageManager::detect() {
+                                        for (k, v) in pm.install_env() {
+                                            cmd.env(k, v);
+                                        }
+                                    }
+                                    let status = cmd.status().with_context(|| {
+                                        format!("Failed to spawn {install_program}")
+                                    })?;
                                     if !status.success() {
                                         anyhow::bail!(
                                             "System dependency install failed (exit {}). \
@@ -1618,6 +1630,46 @@ fn is_effective_root() -> bool {
 /// a non-root user, which fails with a permission error and no
 /// diagnostic. Same "sudo when not root" rule now applies across all
 /// three package managers.
+/// Refresh the host package manager's index before an auto-install, for
+/// managers that don't do it implicitly (#226 follow-up). Best-effort:
+/// failure is logged and the install proceeds — stale metadata may still
+/// resolve, and the install's own error is the more actionable one.
+#[cfg(target_os = "linux")]
+fn run_sysreqs_refresh() {
+    let Some(pm) = uvr_core::sysreqs::PackageManager::detect() else {
+        return;
+    };
+    let Some(refresh) = pm.refresh_args() else {
+        return;
+    };
+    let needs_sudo = !is_effective_root();
+    let (program, args): (String, Vec<String>) = if needs_sudo {
+        let mut a = vec![pm.program().to_string()];
+        a.extend(refresh.iter().map(|s| s.to_string()));
+        ("sudo".to_string(), a)
+    } else {
+        (
+            pm.program().to_string(),
+            refresh.iter().map(|s| s.to_string()).collect(),
+        )
+    };
+    ui::info(format!(
+        "Refreshing package index: {} {}",
+        program,
+        args.join(" ")
+    ));
+    match std::process::Command::new(&program).args(&args).status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => ui::warn(format!(
+            "Package index refresh exited {} — continuing with existing metadata.",
+            s.code().unwrap_or(-1)
+        )),
+        Err(e) => ui::warn(format!(
+            "Could not run package index refresh ({e}) — continuing with existing metadata."
+        )),
+    }
+}
+
 /// The line telling the user how to install missing system dependencies.
 ///
 /// When uvr recognizes the host's package manager it names the exact
