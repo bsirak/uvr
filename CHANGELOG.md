@@ -7,6 +7,15 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **A CRAN mac binary failing to load under a non-CRAN R is now diagnosed
+  as what it is** (#238). When a package's compiled code cannot load because
+  it expects CRAN's R at `/Library/Frameworks/R.framework` (dlopen's
+  "Library not loaded"), the hint now explains the CRAN-binary/Homebrew-R
+  mismatch and both ways out — use CRAN R, or make the Fortran runtime
+  findable to the loader. Previously this failure either got no hint at
+  all or the "missing Fortran toolchain" one, which told users who already
+  had a working gfortran to go install one.
+
 ## v0.4.5 (2026-08-03)
 
 The community release. Four contributors filed thirteen pull requests in
