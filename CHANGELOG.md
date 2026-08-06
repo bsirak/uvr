@@ -16,7 +16,12 @@ Pure tracking section — fixes and small features land here between tags.
   analog of Python's PEP 723, and the first slice of it: plain package names
   only. Version constraints, Bioconductor and git sources (#182), an `r`
   version pin (#183), and `uvr add --script` (#184) follow — a header using
-  any of them is rejected or reported rather than quietly misread.
+  any of them is rejected or reported rather than quietly misread. A file
+  may declare only one header block: a second one is a hard error, as in
+  PEP 723, never a silent no-op. And because a headered script is by design
+  a file you accept from someone else, header text is control-escaped
+  before it appears in uvr's own warnings and errors, so a crafted header
+  cannot smuggle ANSI sequences that repaint or forge diagnostics.
 
   Standalone means standalone: a headered script ignores the surrounding
   project's library, its R constraint, any `.r-version` pin walked up from

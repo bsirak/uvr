@@ -28,10 +28,13 @@ pub async fn run(
     if let Some(constraint) = header.as_ref().and_then(|h| h.r.as_deref()) {
         // Parsed, but #183 is what makes it select an R. Saying so beats
         // running against whichever interpreter happens to be around and
-        // letting the script fail somewhere less obvious.
+        // letting the script fail somewhere less obvious. The constraint is
+        // free text from the header — control-escape it, or a crafted `r`
+        // value could smuggle ANSI sequences into uvr's own diagnostics.
         crate::ui::warn(format!(
-            "script header pins R `{constraint}`, which uvr does not honour yet (#183) — \
-             running against the R resolved as usual"
+            "script header pins R `{}`, which uvr does not honour yet (#183) — \
+             running against the R resolved as usual",
+            script_header::sanitize_for_display(constraint)
         ));
     }
 

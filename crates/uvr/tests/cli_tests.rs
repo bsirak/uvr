@@ -965,6 +965,56 @@ fn test_malformed_toml_in_a_script_header_is_a_hard_error() {
 }
 
 #[test]
+fn test_a_second_header_block_is_a_hard_error() {
+    // #181: a broken header is "never silently ignored". A stale second
+    // block — the classic leftover of a bad merge — used to be discarded
+    // without a word, its dependencies never provisioned.
+    let dir = script_dir(
+        "# /// script\n# dependencies = []\n# ///\n\
+         print(1)\n\
+         # /// script\n# dependencies = [\"nope\"]\n# ///\n",
+    );
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Invalid script header in script.R",
+        ))
+        .stderr(predicate::str::contains("only one"));
+}
+
+#[test]
+fn test_header_text_cannot_smuggle_ansi_into_uvr_output() {
+    // A header is text you accept from a stranger. `\u001b` is legal TOML
+    // that decodes to a live ESC; printed raw it can repaint or overwrite
+    // uvr's own diagnostics. The r-pin warning is the interpolation site a
+    // successfully-parsed header reaches, so it is the one exercised here
+    // against the real binary.
+    let dir = script_dir(
+        "# /// script\n# r = \"\\u001b[31mINJECTED>=4.3\"\n# dependencies = []\n# ///\n",
+    );
+    // The warning fires before an interpreter is resolved, so stderr carries
+    // it whether or not this machine has an R to continue with — the exit
+    // status is deliberately not asserted.
+    let output = uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\\u{1b}[31mINJECTED"),
+        "escaped rendering missing: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("\u{1b}[31mINJECTED"),
+        "raw ESC reached the terminal: {stderr:?}"
+    );
+}
+
+#[test]
 fn test_header_errors_come_before_r_is_needed() {
     // The header is parsed before uvr looks for an interpreter, so the
     // message a user gets is about their typo — not about R being missing on
