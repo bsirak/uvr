@@ -914,15 +914,24 @@ async fn install_from_lockfile_with_r(
         // is the post-download sniff above, so the rows show what will
         // actually happen, not the lock-time estimate.
         if tracing::event_enabled!(tracing::Level::DEBUG) {
-            for (plan, kind) in plans.iter().zip(&detected_per_plan) {
+            for ((plan, kind), result) in plans.iter().zip(&detected_per_plan).zip(&results) {
                 let kind_label = match kind {
                     InstallKind::Binary => "binary",
                     InstallKind::PureR => "pure R",
                     InstallKind::Source => "source",
                 };
+                // The URL that actually served the bytes: when a binary
+                // plan's download fell back to source, showing the binary
+                // URL next to a "source" row would mislead in exactly the
+                // debug case these rows exist for.
+                let url = if plan.is_binary && !result.used_binary {
+                    plan.fallback_url.as_deref().unwrap_or(&plan.url)
+                } else {
+                    &plan.url
+                };
                 ui::bullet_dim(format!(
-                    "{} {} — {kind_label} — {}",
-                    plan.pkg.name, plan.pkg.version, plan.url
+                    "{} {} — {kind_label} — {url}",
+                    plan.pkg.name, plan.pkg.version
                 ));
             }
         }
