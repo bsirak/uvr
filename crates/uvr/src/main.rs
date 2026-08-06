@@ -290,11 +290,13 @@ fn hint_for(msg: &str) -> Option<&'static str> {
         Some(
             "A package installed as a CRAN binary expects CRAN's R at \
              /Library/Frameworks/R.framework, and this R (Homebrew?) is not it, so the \
-             binary's compiled code cannot load. Either use CRAN R from \
-             https://cran.r-project.org/bin/macosx/, or keep this R and make the runtime \
-             findable: `brew install gcc`, then symlink the libraries named in the error \
-             (e.g. libgfortran.5.dylib) from `$(brew --prefix gcc)/lib/gcc/current/` into \
-             `$(R RHOME)/lib/` — the loader's fallback path shown in the error.",
+             binary's compiled code cannot load. Fixes, best first: switch the project to \
+             a uvr-managed R (`uvr r install <ver> && uvr r pin <ver>`) — its lib/ \
+             bundles the Fortran runtime on the loader's fallback path, so CRAN binaries \
+             load; or use CRAN R from https://cran.r-project.org/bin/macosx/; or keep \
+             this R and symlink the libraries named in the error (e.g. \
+             libgfortran.5.dylib) from `$(brew --prefix gcc)/lib/gcc/current/` into \
+             `$(R RHOME)/lib/`.",
         )
     } else if m.contains("emutls_w") || m.contains("/opt/gfortran") {
         Some(
@@ -355,6 +357,11 @@ mod tests {
                    ERROR: lazy loading failed for package 'fields'";
         let hint = hint_for(msg).expect("framework-path load failure should carry a hint");
         assert!(hint.contains("CRAN binary"), "{hint}");
+        // The uvr-native fix leads: the managed portable R bundles
+        // lib/libgfortran.5.dylib (verified against the R-4.6.1 macos-arm64
+        // tarball), which sits exactly on the dlopen fallback path the
+        // error itself prints.
+        assert!(hint.contains("uvr r install"), "{hint}");
         assert!(hint.contains("$(R RHOME)/lib"), "{hint}");
         assert!(
             !hint.contains("mac.r-project.org"),
