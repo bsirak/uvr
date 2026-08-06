@@ -212,9 +212,10 @@ fn fallback_library() -> PathBuf {
 /// Cache key for an ephemeral environment: the directory name under
 /// `<cache>/with-envs/`.
 ///
-/// `packages` must already be sorted, so the same set in any order reuses one
-/// environment. The R version is part of the key because compiled packages are
-/// ABI-bound to an R minor (#160).
+/// `packages` must already be sorted and de-duplicated, so the same set in
+/// any order — including a package named both in a header and via `--with` —
+/// reuses one environment. The R version is part of the key because compiled
+/// packages are ABI-bound to an R minor (#160).
 ///
 /// **This function's output is a compatibility surface.** Changing it silently
 /// orphans every cached environment on every user's machine, so the tests pin
@@ -235,6 +236,10 @@ fn with_env_key(packages: &[String], r_version: &str) -> String {
 async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf> {
     let mut sorted = packages.to_vec();
     sorted.sort();
+    // Same package from the header and `--with` (or listed twice) is one
+    // logical set — without this it would mint a second cache dir and
+    // install everything again.
+    sorted.dedup();
     let short_hash = with_env_key(&sorted, r_version);
 
     let cache_dir = uvr_core::env_vars::cache_dir()
@@ -312,8 +317,10 @@ mod tests {
     use super::*;
 
     fn key(pkgs: &[&str], r: &str) -> String {
+        // Mirrors ensure_with_env's canonicalisation.
         let mut sorted: Vec<String> = pkgs.iter().map(|s| s.to_string()).collect();
         sorted.sort();
+        sorted.dedup();
         with_env_key(&sorted, r)
     }
 
@@ -324,6 +331,12 @@ mod tests {
         assert_eq!(key(&["jsonlite"], "4.4.2"), key(&["jsonlite"], "4.4.2"));
         // Declaration order must not fork the cache.
         assert_eq!(key(&["a", "b"], "4.4.2"), key(&["b", "a"], "4.4.2"));
+        // Nor must a duplicate: the same package named in the header and via
+        // `--with` is one logical set, not a second environment.
+        assert_eq!(
+            key(&["jsonlite", "jsonlite"], "4.4.2"),
+            key(&["jsonlite"], "4.4.2")
+        );
     }
 
     #[test]
