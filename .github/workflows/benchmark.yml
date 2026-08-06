@@ -138,6 +138,7 @@ jobs:
           path: |
             benchmarks/out/bench-results.json
             benchmarks/out/bench.log
+            benchmarks/out/bench-cmds.log
           if-no-files-found: warn
 
       # Surface a one-line summary in the workflow run page so reviewers can

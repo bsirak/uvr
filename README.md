@@ -87,13 +87,13 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 ## Benchmarks
 
 <!-- BENCH:START - auto-updated by benchmarks/update-readme.sh -->
-Install wall time (empty library, index caches warm). All tools use P3M as CRAN mirror. Median of 5 runs on Apple Silicon (arm64), R 4.5.
+Install wall time (empty library, index caches warm). All tools use P3M as CRAN mirror. Median of 3 runs on x86_64, R 4.5.
 
 | Scenario | Packages | uvr sync | renv | install.packages | pak |
 |----------|----------|----------|------|------------------|-----|
-| jsonlite  | 1        | **0.21s**  | 0.5s   | 2.21s              | 2.98s |
-| ggplot2   | 17       | **0.21s**  | 0.54s  | 4.4s               | 5.62s |
-| tidyverse | 99       | **0.27s**  | 0.82s  | 11.78s             | 8.1s  |
+| jsonlite  | 1        | 2.36s      | **2.03s** | 6.8s               | 4.56s |
+| ggplot2   | 17       | 2.36s      | **2.14s** | 116.37s            | 11.59s |
+| tidyverse | 100      | 65.39s     | **3.16s** | 740.66s            | 45.66s |
 <!-- BENCH:END -->
 
 > uvr pre-resolves dependencies into a lockfile (`uvr lock`); only `uvr sync` (install) is timed. The other tools resolve dependencies inline. renv uses its default global cache (symlinks).

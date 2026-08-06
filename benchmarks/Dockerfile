@@ -124,8 +124,12 @@ ENV BENCH_RUNS=5
 # from the container as root would otherwise be unreadable by the host
 # user — chmod 666 the outputs so a subsequent local `run-in-docker.sh`
 # can overwrite them without sudo.
+# BENCH_CMD_LOG captures each timed tool's own output (uvr's "N% cache
+# hit" line especially) for the warm-tier slowness diagnosis (#236).
+ENV BENCH_CMD_LOG=/bench/bench-cmds.log
 ENTRYPOINT ["/bin/bash", "-c", "\
     bash bench.sh 2>&1 | tee /out/bench.log; \
     cp -f bench-results.json /out/bench-results.json 2>/dev/null || true; \
-    chmod -f 666 /out/bench-results.json /out/bench.log 2>/dev/null || true \
+    cp -f bench-cmds.log /out/bench-cmds.log 2>/dev/null || true; \
+    chmod -f 666 /out/bench-results.json /out/bench.log /out/bench-cmds.log 2>/dev/null || true \
 "]

@@ -51,9 +51,17 @@ trap 'rm -f "$UVR_SNAPSHOT"' EXIT
 time_cmd() {
     local timefile
     timefile=$(mktemp)
-    # Separate /usr/bin/time's stderr (captured) from the command's stderr (discarded).
-    # The inner sh -c silences the command; /usr/bin/time writes "real X.XX" to $timefile.
-    /usr/bin/time -p sh -c '"$@" >/dev/null 2>&1' -- "$@" 2>"$timefile"
+    # Separate /usr/bin/time's stderr (captured) from the command's stderr.
+    # The command's own output goes to BENCH_CMD_LOG when set (diagnosis:
+    # the container's warm uvr runs are 10-30x slower than the identical
+    # scenario on a laptop, and the "N% cache hit" line uvr prints is the
+    # difference between "cache miss pathology" and "something else" — #236);
+    # discarded otherwise, as before.
+    if [ -n "${BENCH_CMD_LOG:-}" ]; then
+        /usr/bin/time -p sh -c '"$@" >>"$0" 2>&1' "$BENCH_CMD_LOG" "$@" 2>"$timefile"
+    else
+        /usr/bin/time -p sh -c '"$@" >/dev/null 2>&1' -- "$@" 2>"$timefile"
+    fi
     local exit_code=$?
     local real
     real=$(awk '/^real/{print $2}' "$timefile")
