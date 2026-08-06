@@ -84,6 +84,8 @@ pub fn install_timeout() -> Option<String> {
 /// snippet), via `Project::library_path` (#97).
 /// Expects a valid absolute or relative directory path.
 /// Note: The CLI `--library` argument takes precedence over this variable.
+/// Defaults to the project-local `.uvr/library/` directory when unset or
+/// empty.
 pub fn library() -> Option<PathBuf> {
     read_env_var("UVR_LIBRARY").map(PathBuf::from)
 }

@@ -131,6 +131,7 @@ const RPROFILE_SNIPPET: &str = r#"# >>> uvr >>>
 local({
   lib <- Sys.getenv("UVR_LIBRARY")
   if (!nzchar(lib)) lib <- file.path(getwd(), ".uvr", "library")
+  lib <- normalizePath(lib, mustWork = FALSE)
   lock <- file.path(getwd(), "uvr.lock")
   rver_file <- file.path(getwd(), ".r-version")
   count_locked <- function(path) {
