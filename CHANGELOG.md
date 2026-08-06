@@ -7,6 +7,16 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Source-built packages cached on Linux are now found again by later
+  syncs** (#237). The cache key hashed the binary-repo flavour into every
+  entry it stored, but lookups probe source entries without one — so on
+  any Linux host with a binary repo (a flavour), every package that
+  installed from source landed in the cache under a key no lookup could
+  produce, and was rebuilt from source on every warm sync, forever. The
+  flavour is now part of the key only for binary entries, which is the
+  rule lookups always assumed. Existing mis-keyed source entries were
+  unreachable anyway and are simply superseded.
+
 ## v0.4.5 (2026-08-03)
 
 The community release. Four contributors filed thirteen pull requests in
