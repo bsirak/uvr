@@ -76,7 +76,18 @@ impl Project {
         self.root.join(DOT_UVR_DIR)
     }
 
+    /// The library R uses for this project: `UVR_LIBRARY` when set — a
+    /// machine-local override for hosts where the project tree sits on slow
+    /// network storage (#97) — else the project's own `.uvr/library/`.
+    ///
+    /// `uvr sync` has installed into the variable since it grew `--library`;
+    /// routing every *reader* through the same rule is what makes those
+    /// packages reachable from `uvr run`, `activate`, and doctor instead of
+    /// landing in a directory nothing else looks at.
     pub fn library_path(&self) -> PathBuf {
+        if let Some(lib) = crate::env_vars::library() {
+            return lib;
+        }
         self.dot_uvr_dir().join(LIBRARY_DIR)
     }
 

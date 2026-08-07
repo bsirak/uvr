@@ -78,10 +78,14 @@ pub fn install_timeout() -> Option<String> {
 
 /// UVR_LIBRARY
 ///
-/// Defines a custom target directory for R package installations.
+/// Defines a custom library directory in place of the project-local
+/// `.uvr/library/` — both as the install target and for everything that
+/// reads the library (`uvr run`, `activate`, doctor, the `.Rprofile`
+/// snippet), via `Project::library_path` (#97).
 /// Expects a valid absolute or relative directory path.
 /// Note: The CLI `--library` argument takes precedence over this variable.
-/// Defaults to the project-local `.uvr/library/` directory if neither are provided.
+/// Defaults to the project-local `.uvr/library/` directory when unset or
+/// empty.
 pub fn library() -> Option<PathBuf> {
     read_env_var("UVR_LIBRARY").map(PathBuf::from)
 }
@@ -278,6 +282,14 @@ mod tests {
 
         env::set_var("UVR_LIBRARY", "/custom/library");
         assert_eq!(library(), Some(PathBuf::from("/custom/library")));
+        // #97: the project's library path follows the override, so the
+        // commands that *read* the library look where sync installed.
+        let project = crate::project::Project {
+            root: PathBuf::from("/proj"),
+            manifest: crate::manifest::Manifest::new("t", None),
+            manifest_source: crate::project::ManifestSource::Toml,
+        };
+        assert_eq!(project.library_path(), PathBuf::from("/custom/library"));
 
         env::set_var("UVR_PACKAGES_DIR", "/custom/packages");
         assert_eq!(packages_dir(), Some(PathBuf::from("/custom/packages")));
@@ -303,6 +315,8 @@ mod tests {
         assert_eq!(library(), None);
         assert_eq!(packages_dir(), None);
         assert_eq!(progress(), None);
+        // …and the project's library path falls back to project-local.
+        assert!(project.library_path().ends_with(".uvr/library"));
 
         let empty_r_install = r_install_dir();
         assert!(empty_r_install.is_some());
