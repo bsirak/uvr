@@ -605,7 +605,8 @@ async fn install_from_lockfile_with_r(
     // lookup; the cache is still written to on successful install so
     // future syncs benefit again.
     let mut cache_misses: Vec<&LockedPackage> = Vec::new();
-    let mut cache_hit_count = 0usize;
+    // The packages themselves, not just a count: `-v` prints them (#205).
+    let mut cache_hits: Vec<&LockedPackage> = Vec::new();
     let ignore_cache = cache_lookup_disabled();
     // Whether a cached *binary* entry is usable here at all — see
     // `package_cache::lookup_any`.
@@ -642,7 +643,7 @@ async fn install_from_lockfile_with_r(
         ) {
             match package_cache::clone_to_library(&cached_dir, &library, &pkg.name) {
                 Ok(()) => {
-                    cache_hit_count += 1;
+                    cache_hits.push(pkg);
                     tracing::debug!("Cache hit: {} {}", pkg.name, pkg.version);
                 }
                 Err(e) => {
@@ -655,6 +656,15 @@ async fn install_from_lockfile_with_r(
             }
         } else {
             cache_misses.push(pkg);
+        }
+    }
+
+    // #205: under `-v`, name each package served straight from the package
+    // cache. Printed here rather than with the download rows below because
+    // an all-cached sync never enters that block at all.
+    if tracing::event_enabled!(tracing::Level::DEBUG) {
+        for pkg in &cache_hits {
+            ui::bullet_dim(format!("{} {} — cached", pkg.name, pkg.version));
         }
     }
 
@@ -736,6 +746,14 @@ async fn install_from_lockfile_with_r(
                 "Using {} binary-capable custom source(s); P3M suppressed.",
                 custom_binary.len()
             );
+            // #205: `-v` names them — "1 custom source(s)" is not enough to
+            // debug why a package resolved (or didn't) to a binary.
+            if tracing::event_enabled!(tracing::Level::DEBUG) {
+                for reg in &custom_binary {
+                    let (name, base) = reg.name_and_base();
+                    ui::bullet_dim(format!("{name} ({base})"));
+                }
+            }
             None
         };
 
@@ -863,6 +881,7 @@ async fn install_from_lockfile_with_r(
             .count();
 
         // Compact plan line: "3 cached · 4 binary · 1 from source"
+        let cache_hit_count = cache_hits.len();
         if cache_hit_count > 0 || runtime_binary > 0 || runtime_source > 0 {
             let mut parts = Vec::new();
             if cache_hit_count > 0 {
@@ -885,6 +904,36 @@ async fn install_from_lockfile_with_r(
             // ASCII mode where `bullet()` renders as `.` and the line ends up looking
             // like "Installing 116 package(s) . 111 binary . 5 from source".
             ui::info(format!("{}: {}", action, palette::dim(parts.join(&sep))));
+        }
+
+        // #205: `-v` expands the aggregate into per-package rows — how each
+        // package installs and the URL it resolved to — so an unexpected
+        // source build is explained *before* compilation starts instead of
+        // being reverse-engineered from uvr.lock afterwards. Gated on the
+        // debug filter, which is exactly what `-v` enables; classification
+        // is the post-download sniff above, so the rows show what will
+        // actually happen, not the lock-time estimate.
+        if tracing::event_enabled!(tracing::Level::DEBUG) {
+            for ((plan, kind), result) in plans.iter().zip(&detected_per_plan).zip(&results) {
+                let kind_label = match kind {
+                    InstallKind::Binary => "binary",
+                    InstallKind::PureR => "pure R",
+                    InstallKind::Source => "source",
+                };
+                // The URL that actually served the bytes: when a binary
+                // plan's download fell back to source, showing the binary
+                // URL next to a "source" row would mislead in exactly the
+                // debug case these rows exist for.
+                let url = if plan.is_binary && !result.used_binary {
+                    plan.fallback_url.as_deref().unwrap_or(&plan.url)
+                } else {
+                    &plan.url
+                };
+                ui::bullet_dim(format!(
+                    "{} {} — {kind_label} — {url}",
+                    plan.pkg.name, plan.pkg.version
+                ));
+            }
         }
 
         // "No binary repo" hint — only fires when no packages were binary and at
@@ -1210,7 +1259,7 @@ async fn install_from_lockfile_with_r(
     };
     let mut sub_parts: Vec<String> = Vec::new();
     if total_count > 0 {
-        let hit_pct = (cache_hit_count as f64 / total_count as f64 * 100.0).round() as u64;
+        let hit_pct = (cache_hits.len() as f64 / total_count as f64 * 100.0).round() as u64;
         sub_parts.push(format!("{hit_pct}% cache hit"));
     }
     if runtime_binary > 0 {

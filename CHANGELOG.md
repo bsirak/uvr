@@ -56,6 +56,14 @@ Pure tracking section — fixes and small features land here between tags.
   r-versions directory for that one invocation, taking precedence over
   `UVR_R_INSTALL_DIR` the way uv's flags beat their env vars. The env var
   remains the way to make every command look there.
+- **`uvr sync -v` shows the per-package install plan** (#205). Before
+  anything compiles, `-v` expands the aggregate "Installing 83: 80 binary ·
+  3 from source" into one row per package — name, version, cached/binary/
+  pure-R/source, and the URL it resolved to — and names each binary-capable
+  custom source behind the "Using N custom source(s)" line. An unexpected
+  source build now explains itself up front instead of being
+  reverse-engineered from `uvr.lock` afterwards. Default output is
+  unchanged.
 
 ## v0.4.5 (2026-08-03)
 

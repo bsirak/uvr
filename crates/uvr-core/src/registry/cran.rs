@@ -317,6 +317,18 @@ impl CranRegistry {
     /// Returns true iff at least one entry in this registry has a `Built:`
     /// line matching the host. Used at sync time to decide whether this
     /// custom source contributes binaries.
+    /// Display identity: the source's name and its tarball base URL, for
+    /// telling the user *which* source served their packages (#205).
+    pub fn name_and_base(&self) -> (&str, &str) {
+        let name = match &self.source {
+            PackageSource::Custom { name } => name.as_str(),
+            PackageSource::Cran => "CRAN",
+            PackageSource::Bioconductor => "Bioconductor",
+            _ => "source",
+        };
+        (name, &self.src_base)
+    }
+
     pub fn is_binary_capable(
         &self,
         host: &crate::r_version::downloader::HostTriple,
