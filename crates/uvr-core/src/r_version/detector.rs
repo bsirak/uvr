@@ -313,7 +313,52 @@ pub fn test_find_exact(installations: &[RInstallation], version: &str) -> Result
     find_exact_version(installations, version)
 }
 
+/// Identity of an R binary for memoization: path plus the file's size and
+/// mtime, so reinstalling a different R at the same path is a cache miss.
+type RBinaryIdentity = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
+fn r_binary_identity(binary: &std::path::Path) -> RBinaryIdentity {
+    let md = std::fs::metadata(binary).ok();
+    (
+        binary.to_path_buf(),
+        md.as_ref().map(|m| m.len()).unwrap_or(0),
+        md.as_ref().and_then(|m| m.modified().ok()),
+    )
+}
+
+#[allow(clippy::type_complexity)]
+static R_VERSION_MEMO: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<RBinaryIdentity, Option<String>>>,
+> = std::sync::OnceLock::new();
+
+/// Ask an R binary for its `major.minor` version, memoized per process.
+///
+/// A single `uvr sync` asks the same binary repeatedly — `find_all` probes
+/// every discovered install, the pin-mismatch check re-resolves, the IDE
+/// scaffolding resolves again — and each ask is a full R startup. That's
+/// ~0.1s locally but 0.3–0.5s on a container's shared I/O, which is most
+/// of the fixed floor a warm sync pays before installing anything (#246).
+///
+/// Memoizing is safe within a process: the answer is a property of the
+/// binary, and the key includes size and mtime so an R replaced at the
+/// same path mid-run is a miss rather than a stale hit. Failures are
+/// cached too — a binary that won't start won't start twice.
 pub fn query_r_version(binary: &std::path::Path) -> Option<String> {
+    let key = r_binary_identity(binary);
+    let memo = R_VERSION_MEMO.get_or_init(Default::default);
+    if let Ok(cache) = memo.lock() {
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+    }
+    let answer = query_r_version_uncached(binary);
+    if let Ok(mut cache) = memo.lock() {
+        cache.insert(key, answer.clone());
+    }
+    answer
+}
+
+fn query_r_version_uncached(binary: &std::path::Path) -> Option<String> {
     let output = Command::new(binary)
         // When uvr runs inside an R session (RStudio terminal, `system("uvr …")`
         // from uvr-r), the enclosing session's R_HOME/R_LIBS* leak into this
