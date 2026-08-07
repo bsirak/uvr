@@ -52,6 +52,10 @@ Pure tracking section — fixes and small features land here between tags.
   findable to the loader. Previously this failure either got no hint at
   all or the "missing Fortran toolchain" one, which told users who already
   had a working gfortran to go install one.
+- **`uvr r install --install-dir <DIR>`** (#89) installs R into a chosen
+  r-versions directory for that one invocation, taking precedence over
+  `UVR_R_INSTALL_DIR` the way uv's flags beat their env vars. The env var
+  remains the way to make every command look there.
 
 ## v0.4.5 (2026-08-03)
 

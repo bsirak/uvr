@@ -437,6 +437,13 @@ pub struct RInstallArgs {
     /// Posit CDN slug no longer applies. Accepted for backward compatibility.
     #[arg(long, value_name = "SLUG", hide = true)]
     pub distribution: Option<String>,
+
+    /// Install into this r-versions directory instead of the default
+    /// (overrides UVR_R_INSTALL_DIR for this invocation). Other commands
+    /// find R there only while UVR_R_INSTALL_DIR points at the same
+    /// directory.
+    #[arg(long, value_name = "DIR")]
+    pub install_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]

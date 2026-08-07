@@ -13,9 +13,18 @@ impl RManager {
 
     /// Install a specific R version. `version` may be partial (`4.5`);
     /// returns the full version actually installed (e.g. `4.5.3`).
-    pub async fn install(&self, version: &str) -> Result<String> {
+    ///
+    /// `install_root` overrides the r-versions directory (`--install-dir`,
+    /// #89); `None` keeps the default `UVR_R_INSTALL_DIR` / `~/.uvr/r-versions`
+    /// resolution.
+    pub async fn install(
+        &self,
+        version: &str,
+        install_root: Option<&std::path::Path>,
+    ) -> Result<String> {
         let platform = Platform::detect()?;
-        let install_dir = download_and_install_r(&self.client, version, platform).await?;
+        let install_dir =
+            download_and_install_r(&self.client, version, platform, install_root).await?;
         Ok(install_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

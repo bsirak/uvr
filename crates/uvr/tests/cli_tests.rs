@@ -189,6 +189,32 @@ fn test_r_pin_help_works() {
 }
 
 #[test]
+fn test_r_install_advertises_install_dir() {
+    // #89: `--install-dir` overrides UVR_R_INSTALL_DIR for one invocation.
+    // The help text is the discoverable surface of that agreement.
+    uvr_cmd()
+        .args(["r", "install", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--install-dir"))
+        .stdout(predicate::str::contains("UVR_R_INSTALL_DIR"));
+}
+
+#[test]
+fn test_r_install_rejects_an_empty_install_dir() {
+    // An empty path would reach the downloader and die there as "Install
+    // path <version> has no parent directory" — an error that never names
+    // the flag. It cannot: clap's PathBuf parser refuses empty values at
+    // the argument layer. This pins that guarantee so a parser change
+    // cannot quietly reopen the hole.
+    uvr_cmd()
+        .args(["r", "install", "4.5.1", "--install-dir", ""])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("a value is required"));
+}
+
+#[test]
 fn test_sync_without_lockfile_fails() {
     let dir = init_project("no-lock-test");
     uvr_cmd()

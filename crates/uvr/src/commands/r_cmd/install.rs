@@ -6,7 +6,11 @@ use uvr_core::r_version::manager::RManager;
 use crate::ui;
 use crate::ui::palette;
 
-pub async fn run(version: String, distribution: Option<String>) -> Result<()> {
+pub async fn run(
+    version: String,
+    distribution: Option<String>,
+    install_dir: Option<std::path::PathBuf>,
+) -> Result<()> {
     let platform = Platform::detect().context("Unsupported platform")?;
 
     // `--distribution` is deprecated: portable R builds are selected purely by
@@ -65,7 +69,7 @@ pub async fn run(version: String, distribution: Option<String>) -> Result<()> {
     // May differ from the requested version: a partial `4.5` resolves to the
     // newest published `4.5.x` (#170).
     let resolved = manager
-        .install(&version)
+        .install(&version, install_dir.as_deref())
         .await
         .context("R installation failed")?;
 
