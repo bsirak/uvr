@@ -283,6 +283,21 @@ fn hint_for(msg: &str) -> Option<&'static str> {
         Some("Run `uvr r install <version>` or ensure R is on PATH.")
     } else if m.contains("base r package") {
         Some("Remove this package from your manifest — base packages ship with R.")
+    } else if m.contains("library not loaded") && m.contains("/library/frameworks/r.framework") {
+        // Checked before the missing-toolchain case: this failure names a
+        // library CRAN's R would provide, so "install gfortran" sends a user
+        // who already has it (Homebrew's, say) chasing the wrong fix (#238).
+        Some(
+            "A package installed as a CRAN binary expects CRAN's R at \
+             /Library/Frameworks/R.framework, and this R (Homebrew?) is not it, so the \
+             binary's compiled code cannot load. Fixes, best first: switch the project to \
+             a uvr-managed R (`uvr r install <ver> && uvr r pin <ver>`) — its lib/ \
+             bundles the Fortran runtime on the loader's fallback path, so CRAN binaries \
+             load; or use CRAN R from https://cran.r-project.org/bin/macosx/; or keep \
+             this R and symlink the libraries named in the error (e.g. \
+             libgfortran.5.dylib) from `$(brew --prefix gcc)/lib/gcc/current/` into \
+             `$(R RHOME)/lib/`.",
+        )
     } else if m.contains("emutls_w") || m.contains("/opt/gfortran") {
         Some(
             "Missing Fortran toolchain on macOS. Install the CRAN gfortran build from \
@@ -325,5 +340,43 @@ mod tests {
         let msg = "Network error: error sending request for url (https://example.org): \
                    connection refused";
         assert!(hint_for(msg).is_none_or(|h| !h.contains("trust store")));
+    }
+
+    #[test]
+    fn cran_binary_on_a_non_cran_r_gets_the_framework_hint_not_the_toolchain_one() {
+        // #238: a CRAN mac binary (dotCall64) hard-links CRAN's
+        // R.framework path for libgfortran; under Homebrew R that path
+        // doesn't exist and the load fails. The reporter *had* a working
+        // Homebrew gfortran — it compiled the very package being
+        // installed — so "install a Fortran toolchain" is the wrong door.
+        let msg = "Failed to install fields\n\
+                   R CMD INSTALL failed for 'fields' (exit 1):\n\
+                   dlopen(/Users/x/proj/.uvr/library/dotCall64/libs/dotCall64.so, 0x0006): \
+                   Library not loaded: /Library/Frameworks/R.framework/Versions/4.6/\
+                   Resources/lib/libgfortran.5.dylib\n\
+                   ERROR: lazy loading failed for package 'fields'";
+        let hint = hint_for(msg).expect("framework-path load failure should carry a hint");
+        assert!(hint.contains("CRAN binary"), "{hint}");
+        // The uvr-native fix leads: the managed portable R bundles
+        // lib/libgfortran.5.dylib (verified against the R-4.6.1 macos-arm64
+        // tarball), which sits exactly on the dlopen fallback path the
+        // error itself prints.
+        assert!(hint.contains("uvr r install"), "{hint}");
+        assert!(hint.contains("$(R RHOME)/lib"), "{hint}");
+        assert!(
+            !hint.contains("mac.r-project.org"),
+            "misrouted to the missing-toolchain hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_missing_fortran_toolchain_still_gets_the_toolchain_hint() {
+        // The pre-#238 case must keep its hint: no dlopen, no framework
+        // path — the compiler itself is absent at CRAN's install location.
+        let msg = "Failed to install edgeR\n\
+                   R CMD INSTALL failed for 'edgeR' (exit 1):\n\
+                   make: /opt/gfortran/bin/gfortran: No such file or directory";
+        let hint = hint_for(msg).expect("missing toolchain should carry a hint");
+        assert!(hint.contains("mac.r-project.org"), "{hint}");
     }
 }

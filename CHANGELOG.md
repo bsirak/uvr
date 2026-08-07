@@ -44,6 +44,14 @@ Pure tracking section — fixes and small features land here between tags.
   network storage (Azure ML mapped drives and similar), matching
   `UV_PROJECT_ENVIRONMENT` / `RENV_PATHS_LIBRARY` / `RV_LIBRARY_DIR`.
   Pruning still never runs against an override target.
+- **A CRAN mac binary failing to load under a non-CRAN R is now diagnosed
+  as what it is** (#238). When a package's compiled code cannot load because
+  it expects CRAN's R at `/Library/Frameworks/R.framework` (dlopen's
+  "Library not loaded"), the hint now explains the CRAN-binary/Homebrew-R
+  mismatch and both ways out — use CRAN R, or make the Fortran runtime
+  findable to the loader. Previously this failure either got no hint at
+  all or the "missing Fortran toolchain" one, which told users who already
+  had a working gfortran to go install one.
 
 ## v0.4.5 (2026-08-03)
 
