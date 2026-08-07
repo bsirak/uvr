@@ -13,8 +13,11 @@
 //!   tree. This dedupes disk usage across projects (issue #24 follow-up) and
 //!   matches renv's behavior. R resolves library paths through symlinks
 //!   transparently.
-//! - **Windows**: recursive file copy. Symlinks on Windows need admin rights
-//!   and are fragile across users/drives; copy stays predictable.
+//! - **Windows**: per-file hardlinks (#247). Symlinks there need admin
+//!   rights, but hardlinks do not — so the library gets ordinary-looking
+//!   files that share storage with the cache, instead of the full byte copy
+//!   this path used to pay on every warm sync. Falls back to a copy when
+//!   the cache and project sit on different volumes.
 
 use std::path::{Path, PathBuf};
 
@@ -288,6 +291,32 @@ pub fn clone_to_library(
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        // Hardlink each file rather than copying its bytes (#247). Windows
+        // had been paying a full recursive copy on every warm cache hit
+        // while macOS cloned and Linux symlinked. Hardlinks need no
+        // privileges on NTFS (unlike symlinks, the reason this path was a
+        // copy originally), but they do require one volume — a cache and
+        // project on different drives lands in the fallback below.
+        match hardlink_dir_recursive(cached_pkg_dir, &dest) {
+            Ok(()) => {
+                debug!(
+                    "hardlinked {} → {}",
+                    cached_pkg_dir.display(),
+                    dest.display()
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                debug!("hardlink failed ({}), falling back to copy", e);
+                // Partial tree from the failed attempt would otherwise make
+                // the copy below merge into it.
+                let _ = remove_entry(&dest);
+            }
+        }
+    }
+
     copy_dir_recursive(cached_pkg_dir, &dest)
 }
 
@@ -463,6 +492,53 @@ fn clone_dir_macos(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Recursively copy a directory tree. Symlinks are reproduced as symlinks
 /// (not traversed) to match `clonefile()` behavior and prevent traversal
 /// outside the source tree.
+/// Recreate `src` at `dst`, hardlinking regular files instead of copying
+/// their bytes. Directories are created; symlinks are reproduced as
+/// symlinks (Unix) or copied (Windows), same as [`copy_dir_recursive`].
+///
+/// Used for the Windows attach path (#247), where the alternative is a full
+/// byte copy of every package on every warm sync — the other platforms have
+/// had an instant path since v0.3 (clonefile on macOS, symlink on Linux).
+/// NTFS hardlinks need no special privileges, unlike symlinks.
+///
+/// Constraints this inherits: hardlinks require both paths on one volume,
+/// and the linked inode is shared, so a caller that later writes in place
+/// into an attached file would corrupt the cache. R package files are
+/// read-only after install, and uvr's extraction writes into the cache
+/// before attaching, never through an attached path.
+///
+/// Returns `Err` on the first failure so the caller can fall back to a
+/// plain copy; partial output at `dst` is the caller's to clean up.
+pub fn hardlink_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            #[cfg(unix)]
+            {
+                let target = std::fs::read_link(&src_path)?;
+                std::os::unix::fs::symlink(&target, &dst_path)?;
+            }
+            #[cfg(not(unix))]
+            {
+                if src_path.is_dir() {
+                    hardlink_dir_recursive(&src_path, &dst_path)?;
+                } else {
+                    std::fs::copy(&src_path, &dst_path)?;
+                }
+            }
+        } else if ft.is_dir() {
+            hardlink_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::hard_link(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -1070,6 +1146,70 @@ mod tests {
         let link = library.join("dplyr");
         let target = std::fs::read_link(&link).unwrap();
         assert_eq!(target, cache_b);
+    }
+
+    /// The hardlink attach path is Windows-only in `clone_to_library`, but
+    /// the tree-walking logic is platform-independent — exercise it
+    /// everywhere so a regression can't hide until it reaches a Windows
+    /// user (the platform with the least local testing).
+    #[test]
+    fn hardlink_dir_recursive_reproduces_the_tree_and_shares_storage() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src_pkg");
+        std::fs::create_dir_all(src.join("R")).unwrap();
+        std::fs::create_dir_all(src.join("Meta")).unwrap();
+        std::fs::write(src.join("DESCRIPTION"), "Package: t\n").unwrap();
+        std::fs::write(src.join("R/foo.R"), "foo <- 1").unwrap();
+        std::fs::write(src.join("Meta/package.rds"), b"rds").unwrap();
+
+        let dst = tmp.path().join("dst_pkg");
+        hardlink_dir_recursive(&src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("DESCRIPTION")).unwrap(),
+            "Package: t\n"
+        );
+        assert!(dst.join("R/foo.R").exists());
+        assert!(dst.join("Meta/package.rds").exists());
+
+        // Storage is shared, not copied: same inode on Unix. (The Windows
+        // equivalent is unobservable through std, hence the Unix gate — the
+        // tree-shape assertions above still run everywhere.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let a = std::fs::metadata(src.join("R/foo.R")).unwrap();
+            let b = std::fs::metadata(dst.join("R/foo.R")).unwrap();
+            assert_eq!(a.ino(), b.ino(), "hardlink should share the inode");
+            assert_eq!(b.nlink(), 2, "both paths should reference one inode");
+        }
+    }
+
+    #[test]
+    fn hardlink_dir_recursive_reproduces_symlinks_without_following_them() {
+        // A cached package can contain SONAME symlinks (#203). They must
+        // stay symlinks — following them would duplicate megabytes of
+        // vendored shared libraries into every project library.
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src_pkg");
+        std::fs::create_dir_all(src.join("libs")).unwrap();
+        std::fs::write(src.join("libs/libtbb.so.2"), b"so bytes").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("libtbb.so.2", src.join("libs/libtbb.so")).unwrap();
+
+        let dst = tmp.path().join("dst_pkg");
+        hardlink_dir_recursive(&src, &dst).unwrap();
+
+        assert!(dst.join("libs/libtbb.so.2").exists());
+        #[cfg(unix)]
+        {
+            let link = dst.join("libs/libtbb.so");
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                std::path::PathBuf::from("libtbb.so.2")
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

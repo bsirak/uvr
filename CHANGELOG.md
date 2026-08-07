@@ -7,6 +7,24 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Windows warm syncs no longer copy every package** (#247): cache hits
+  now hardlink each file into the project library instead of copying its
+  bytes. macOS has cloned (copy-on-write) and Linux has symlinked since
+  v0.3; Windows was paying a full recursive copy on every sync because
+  symlinks there need admin rights — hardlinks don't. Falls back to a copy
+  when the cache and project sit on different volumes.
+- R version detection is memoized per process (#246). A single sync asked
+  the same R binary for its version several times over — `find_all`, the
+  pin-mismatch check, and the IDE scaffolding each spawned R — and each ask
+  is a full R startup, cheap locally but 0.3-0.5s on a container's shared
+  I/O. Keyed on path, size and mtime, so an R replaced mid-run is a miss
+  rather than a stale hit.
+- `uvr sync --install-system-deps` refreshes the package index first on
+  managers that need it (apt-get, zypper, pacman, apk), passes zypper
+  `--gpg-auto-import-keys`, and sets `DEBIAN_FRONTEND=noninteractive` for
+  apt — fresh containers ship no synced metadata, an unimported repo key
+  made `--non-interactive` zypper decline, and `-y` doesn't answer debconf.
+
 ## v0.4.5 (2026-08-03)
 
 The community release. Four contributors filed thirteen pull requests in
