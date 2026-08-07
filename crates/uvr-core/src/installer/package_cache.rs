@@ -86,10 +86,16 @@ pub fn cache_key(
     // artifacts linking different libraries, and only one of them loads on a
     // given host (#175) — so they must not share a cache entry.
     //
-    // Only hashed when present, which keeps macOS/Windows and source-built
-    // keys byte-identical to before; only Linux binary entries are
-    // re-keyed, and those are exactly the ones that were ambiguous.
-    if let Some(flavor) = binary_flavor {
+    // Only hashed for *binary* entries: a source build is compiled on this
+    // host and is not repo-specific. Enforced here, not at call sites —
+    // the store path passed the session's flavour unconditionally while
+    // lookup probed source entries without one, so every source-kind entry
+    // on flavoured Linux landed under a key no lookup could produce, and
+    // was rebuilt on every warm sync forever (#237). Keying by
+    // `is_binary && flavor` keeps macOS/Windows and source keys
+    // byte-identical to before; only Linux binary entries carry it, and
+    // those are exactly the ones #175 made ambiguous.
+    if let (true, Some(flavor)) = (is_binary, binary_flavor) {
         hasher.update(b"|");
         hasher.update(flavor.as_bytes());
     }
@@ -648,6 +654,22 @@ mod tests {
         let k1 = cache_key("pkg", "1.0", Some("abc"), "4.4", true, None, None);
         let k2 = cache_key("pkg", "1.0", Some("abc"), "4.4", false, None, None);
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn a_source_entry_ignores_the_binary_flavor() {
+        // The store path passes the session's binary flavour for every
+        // package it caches; lookup probes source entries with no flavour
+        // ("a source build is compiled here and is not repo-specific").
+        // Hashing the flavour into a source key therefore stored every
+        // source-kind entry on flavoured Linux under a key no lookup could
+        // ever produce — an eternal warm-tier miss that re-ran
+        // R CMD INSTALL on every sync (#237). The key must make the two
+        // sides agree by construction.
+        assert_eq!(
+            cache_key("pkg", "1.0", Some("abc"), "4.4", false, None, Some("jammy")),
+            cache_key("pkg", "1.0", Some("abc"), "4.4", false, None, None)
+        );
     }
 
     #[test]
