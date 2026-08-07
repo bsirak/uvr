@@ -893,3 +893,359 @@ Write-Output ("AFTER_DEACTIVATE_PRESENT=" + (Test-Path Function:\deactivate))
         "{stdout}"
     );
 }
+
+// ─── inline script headers (#181) ───────────────────────────
+
+/// Write `source` to `script.R` in a fresh directory.
+fn script_dir(source: &str) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("script.R"), source).unwrap();
+    dir
+}
+
+/// An R script that reports whether the *project* library is on the search
+/// path, printing `LINKED` or `NOT_LINKED`.
+///
+/// The comparison happens inside R rather than by matching the path in Rust,
+/// because a Rust-side `String::contains` cannot survive Windows: R prints
+/// `.libPaths()` with forward slashes where `Path` renders backslashes, and
+/// GitHub's Windows runners point `TEMP` at the 8.3 short form
+/// (`C:\Users\RUNNER~1\…`) while R resolves and prints the long form
+/// (`C:/Users/runneradmin/…`). Two different spellings of one directory.
+///
+/// Getting this wrong is worse than a red test: a `!contains` assertion that
+/// can never match passes vacuously, so the isolation check would quietly
+/// stop checking anything on the one platform where the profile suppression
+/// is spelled differently.
+const REPORTS_PROJECT_LIB_LINKAGE: &str = r#"
+lib <- normalizePath(file.path(getwd(), ".uvr", "library"), winslash = "/", mustWork = FALSE)
+paths <- normalizePath(.libPaths(), winslash = "/", mustWork = FALSE)
+cat(if (lib %in% paths) "LINKED" else "NOT_LINKED", "\n")
+cat(paths, sep = "\n")
+"#;
+
+#[test]
+fn test_unterminated_script_header_is_a_hard_error() {
+    // No closing `# ///` at all: every declared dependency would be silently
+    // dropped and resurface as a missing-package failure somewhere far away.
+    let dir = script_dir("# /// script\n# dependencies = [\"ggplot2\"]\n");
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Invalid script header in script.R",
+        ))
+        .stderr(predicate::str::contains("unterminated"));
+}
+
+#[test]
+fn test_stray_code_inside_the_header_names_the_offending_line() {
+    // The block *is* closed further down, so "unterminated" would be the
+    // wrong diagnosis — the message must point at the line that cannot
+    // belong to it.
+    let dir = script_dir(
+        "# /// script\n# dependencies = [\"ggplot2\"]\nlibrary(ggplot2)\n# ///\nprint(1)\n",
+    );
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Invalid script header in script.R",
+        ))
+        .stderr(predicate::str::contains("library(ggplot2)"));
+}
+
+#[test]
+fn test_a_spec_grammar_this_slice_cannot_honour_is_rejected() {
+    // Passing `ggplot2>=3.4` through would reach the resolver as a literal
+    // package name and fail with "Package not found: ggplot2>=3.4" plus a
+    // nonsense `uvr add cran/ggplot2>=3.4@master` suggestion — naming
+    // neither the cause nor the fix.
+    let dir = script_dir("# /// script\n# dependencies = [\"ggplot2>=3.4\"]\n# ///\n");
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Invalid script header in script.R",
+        ))
+        .stderr(predicate::str::contains("not a plain package name"));
+}
+
+#[test]
+fn test_malformed_toml_in_a_script_header_is_a_hard_error() {
+    let dir = script_dir("# /// script\n# dependencies = [\n# ///\n");
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Invalid script header in script.R",
+        ));
+}
+
+#[test]
+fn test_a_second_header_block_is_a_hard_error() {
+    // #181: a broken header is "never silently ignored". A stale second
+    // block — the classic leftover of a bad merge — used to be discarded
+    // without a word, its dependencies never provisioned.
+    let dir = script_dir(
+        "# /// script\n# dependencies = []\n# ///\n\
+         print(1)\n\
+         # /// script\n# dependencies = [\"nope\"]\n# ///\n",
+    );
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Invalid script header in script.R",
+        ))
+        .stderr(predicate::str::contains("only one"));
+}
+
+#[test]
+fn test_header_text_cannot_smuggle_ansi_into_uvr_output() {
+    // A header is text you accept from a stranger. `\u001b` is legal TOML
+    // that decodes to a live ESC; printed raw it can repaint or overwrite
+    // uvr's own diagnostics. The r-pin warning is the interpolation site a
+    // successfully-parsed header reaches, so it is the one exercised here
+    // against the real binary.
+    let dir = script_dir(
+        "# /// script\n# r = \"\\u001b[31mINJECTED>=4.3\"\n# dependencies = []\n# ///\n",
+    );
+    // The warning fires before an interpreter is resolved, so stderr carries
+    // it whether or not this machine has an R to continue with — the exit
+    // status is deliberately not asserted.
+    let output = uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\\u{1b}[31mINJECTED"),
+        "escaped rendering missing: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("\u{1b}[31mINJECTED"),
+        "raw ESC reached the terminal: {stderr:?}"
+    );
+}
+
+#[test]
+fn test_header_errors_come_before_r_is_needed() {
+    // The header is parsed before uvr looks for an interpreter, so the
+    // message a user gets is about their typo — not about R being missing on
+    // a machine where it is irrelevant to the failure.
+    let dir = script_dir("# /// script\n# dependencies = [\"x\"]\n");
+    let output = uvr_cmd()
+        .args(["run", "script.R", "--r-version", "99.9.9"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid script header"),
+        "expected a header error, got: {stderr}"
+    );
+    assert!(!stderr.contains("R not found"), "{stderr}");
+}
+
+#[test]
+fn test_a_comment_divider_is_not_a_script_header() {
+    // `# ///` is a plausible section divider. A script using one must not be
+    // rejected as a broken header — it has no header at all, so this behaves
+    // exactly as it did before inline headers existed (regression).
+    let dir = script_dir("# ///\n# just a divider\nprint(1)\n");
+    let output = uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("script header"), "{stderr}");
+}
+
+#[test]
+fn test_headerless_script_does_not_gain_a_header_error() {
+    // Regression: ordinary scripts are untouched by header detection.
+    let dir = script_dir("library(stats)\nprint(1)\n");
+    let output = uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("script header"), "{stderr}");
+}
+
+#[test]
+#[ignore = "requires network access to CRAN/P3M and a managed R"]
+fn test_headered_script_runs_standalone_in_an_empty_directory() {
+    // The whole promise of #181: no project, no manifest, no setup — the
+    // file carries its environment. Run with `cargo test -- --ignored`.
+    let dir = script_dir(
+        "# /// script\n\
+         # dependencies = [\"jsonlite\"]\n\
+         # ///\n\
+         cat(jsonlite::toJSON(list(ok = TRUE)))\n",
+    );
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"ok\""));
+}
+
+#[test]
+#[ignore = "requires network access to CRAN/P3M and a managed R"]
+fn test_headered_script_ignores_the_surrounding_project() {
+    // Run the same script inside a project that declares a *different*
+    // package. If the project library leaked onto the search path, the
+    // undeclared package would resolve and the script would wrongly succeed.
+    let dir = init_project("leaky");
+    fs::write(
+        dir.path().join("script.R"),
+        "# /// script\n\
+         # dependencies = [\"jsonlite\"]\n\
+         # ///\n\
+         cat(if (requireNamespace(\"cli\", quietly = TRUE)) \"LEAKED\" else \"ISOLATED\")\n",
+    )
+    .unwrap();
+    uvr_cmd()
+        .args(["add", "cli"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ISOLATED"));
+}
+
+#[test]
+fn test_headered_script_does_not_inherit_the_project_library() {
+    // The isolation that makes a headered script portable is not delivered
+    // by environment variables alone: uvr's own project `.Rprofile` runs
+    // `.libPaths(unique(c(lib, .libPaths())))` at startup, which would put
+    // the surrounding project's library *ahead* of the script's own
+    // environment. An empty dependency list keeps this offline.
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = init_project("isolation");
+    fs::write(
+        dir.path().join("script.R"),
+        format!("# /// script\n# dependencies = []\n# ///\n{REPORTS_PROJECT_LIB_LINKAGE}"),
+    )
+    .unwrap();
+
+    let out = uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        stdout.contains("NOT_LINKED"),
+        "the project library leaked into a headered script's search path:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("with-envs"),
+        "expected the ephemeral environment on the search path:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_headerless_script_still_gets_the_project_library() {
+    // The converse regression: suppressing the startup profile is scoped to
+    // script mode, so an ordinary `uvr run` inside a project still has its
+    // library linked by `.Rprofile` exactly as before.
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = init_project("linked");
+    fs::write(
+        dir.path().join("script.R"),
+        REPORTS_PROJECT_LIB_LINKAGE.trim_start(),
+    )
+    .unwrap();
+
+    let out = uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        stdout.contains("LINKED") && !stdout.contains("NOT_LINKED"),
+        "the project library is no longer linked for an ordinary run:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_headered_script_ignores_a_surrounding_r_version_pin() {
+    // `.r-version` is walked up from the working directory and outranks every
+    // other signal, so without this a headered script would let whichever
+    // project it happens to sit in choose its interpreter — and the R version
+    // is part of the ephemeral environment's cache key, so the same file
+    // would get a different set of packages per directory.
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir = script_dir("# /// script\n# dependencies = []\n# ///\ncat(\"RAN\\n\")\n");
+    fs::write(dir.path().join("plain.R"), "cat(\"RAN\\n\")\n").unwrap();
+    // A version nobody has installed, so honouring the pin is unmistakable.
+    fs::write(dir.path().join(".r-version"), "3.0.0\n").unwrap();
+
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("RAN"));
+
+    // The converse: an ordinary run still honours the pin, so the change is
+    // scoped to script mode.
+    uvr_cmd()
+        .args(["run", "plain.R"])
+        .current_dir(dir.path())
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_an_unsupported_r_pin_in_a_header_is_reported_not_swallowed() {
+    // `r` is parsed but not honoured until #183. Running against whichever R
+    // happens to be around without saying so is the trap this guards.
+    if !have_r() {
+        eprintln!("skipping: no R on PATH");
+        return;
+    }
+    let dir =
+        script_dir("# /// script\n# r = \">=4.3\"\n# dependencies = []\n# ///\ncat(\"RAN\\n\")\n");
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("RAN"))
+        .stderr(predicate::str::contains("does not honour yet"));
+}

@@ -11,6 +11,13 @@ pub enum UvrError {
     #[error("Lockfile parse error: {0}")]
     LockfileParse(String),
 
+    /// A script's inline dependency header could not be read.
+    ///
+    /// Rendered bare because the caller knows the file and prefixes it —
+    /// "Invalid script header in <file>: <this>".
+    #[error("{0}")]
+    ScriptHeaderParse(String),
+
     #[error("Package not found: {0}. If this package was recently archived from CRAN, try installing from the CRAN GitHub mirror: uvr add cran/{0}@master")]
     PackageNotFound(String),
 

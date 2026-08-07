@@ -120,6 +120,23 @@ pub fn find_all() -> Vec<RInstallation> {
 /// 2. `version_constraint` from `uvr.toml` (semver requirement)
 /// 3. Any managed installation, then system R
 pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
+    resolve_r_binary(version_constraint, true)
+}
+
+/// Like [`find_r_binary`], but ignores any `.r-version` pin.
+///
+/// For standalone script runs (#181). A script carrying its own dependency
+/// header has to resolve the same way in every directory — that is the whole
+/// promise of it. The pin is walked up from the working directory, so
+/// honouring it would let whatever project the file happens to be sitting in
+/// choose the interpreter, and with it the ephemeral environment's cache key:
+/// the same script would get a different R, and a different set of installed
+/// packages, purely because of where it was run from.
+pub fn find_r_binary_ignoring_pin(version_constraint: Option<&str>) -> Result<PathBuf> {
+    resolve_r_binary(version_constraint, false)
+}
+
+fn resolve_r_binary(version_constraint: Option<&str>, honor_pin: bool) -> Result<PathBuf> {
     let installations = find_all();
 
     if installations.is_empty() {
@@ -127,8 +144,10 @@ pub fn find_r_binary(version_constraint: Option<&str>) -> Result<PathBuf> {
     }
 
     // 1. Honour .r-version exact pin
-    let cwd = std::env::current_dir().unwrap_or_default();
-    if let Some(pinned) = read_r_version_pin_from(&cwd) {
+    let pin = honor_pin
+        .then(|| read_r_version_pin_from(&std::env::current_dir().unwrap_or_default()))
+        .flatten();
+    if let Some(pinned) = pin {
         let bin = find_exact_version(&installations, &pinned)?;
         // Validate the pinned install — a broken managed R (one whose binary
         // doesn't respond to a version query, e.g. a corrupted or partially

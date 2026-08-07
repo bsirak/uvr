@@ -1,30 +1,59 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 
 use uvr_core::manifest::{DependencySpec, Manifest};
 use uvr_core::project::{ManifestSource, Project};
 use uvr_core::r_env::REnv;
-use uvr_core::r_version::detector::{find_r_binary, query_r_version};
+use uvr_core::r_version::detector::{find_r_binary, find_r_binary_ignoring_pin, query_r_version};
+use uvr_core::script_header::{self, ScriptHeader};
 
 pub async fn run(
     script: Option<String>,
     r_version_override: Option<String>,
-    with_packages: Vec<String>,
+    mut with_packages: Vec<String>,
     args: Vec<String>,
 ) -> Result<()> {
+    // A script carrying an inline dependency header runs *standalone*: the
+    // surrounding project is ignored entirely, which is exactly what lets the
+    // same file reproduce in any directory on anyone's machine (#181).
+    let header = match script.as_deref() {
+        Some(path) => read_header(path)?,
+        None => None,
+    };
+    let script_mode = header.is_some();
+
+    if let Some(constraint) = header.as_ref().and_then(|h| h.r.as_deref()) {
+        // Parsed, but #183 is what makes it select an R. Saying so beats
+        // running against whichever interpreter happens to be around and
+        // letting the script fail somewhere less obvious. The constraint is
+        // free text from the header — control-escape it, or a crafted `r`
+        // value could smuggle ANSI sequences into uvr's own diagnostics.
+        crate::ui::warn(format!(
+            "script header pins R `{}`, which uvr does not honour yet (#183) — \
+             running against the R resolved as usual",
+            script_header::sanitize_for_display(constraint)
+        ));
+    }
+
     // Resolve project (optional — uvr run works outside a project too).
-    let (project_library, project_r_constraint) = match Project::find_cwd() {
-        Ok(p) => {
-            p.ensure_library_dir()
-                .context("Failed to create .uvr/library/")?;
-            let lib = p.library_path();
-            let rv = p.manifest.project.r_version.clone();
-            (Some(lib), rv)
+    // Skipped in script mode, so a headered script neither inherits the
+    // project's R constraint nor creates its `.uvr/library/` as a side effect.
+    let (project_library, project_r_constraint) = if script_mode {
+        (None, None)
+    } else {
+        match Project::find_cwd() {
+            Ok(p) => {
+                p.ensure_library_dir()
+                    .context("Failed to create .uvr/library/")?;
+                let lib = p.library_path();
+                let rv = p.manifest.project.r_version.clone();
+                (Some(lib), rv)
+            }
+            Err(_) => (None, None),
         }
-        Err(_) => (None, None),
     };
 
     // --r-version flag takes priority over the project constraint.
@@ -32,23 +61,30 @@ pub async fn run(
         .as_deref()
         .or(project_r_constraint.as_deref());
 
-    let r_binary = find_r_binary(effective_constraint)
-        .context("R not found. Install R or use `uvr r install <version>`")?;
+    // In script mode a `.r-version` pin is ignored along with the rest of the
+    // project. `find_r_binary` walks up from the working directory to find
+    // one, and the pin outranks every other signal — so honouring it would
+    // let the directory a script happens to sit in choose its interpreter,
+    // and with it the ephemeral environment's cache key.
+    let r_binary = if script_mode {
+        find_r_binary_ignoring_pin(effective_constraint)
+    } else {
+        find_r_binary(effective_constraint)
+    }
+    .context("R not found. Install R or use `uvr r install <version>`")?;
 
-    let library: PathBuf = project_library.unwrap_or_else(|| {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| {
-                // HOME-less environment (sandbox/CI): degrade to the system
-                // temp dir instead of dropping a library tree into the
-                // working directory (#161).
-                std::env::temp_dir()
-            })
-            .join("uvr")
-            .join("library")
-    });
+    // A headered script's dependencies join any `--with` packages in a single
+    // ephemeral environment.
+    if let Some(header) = &header {
+        with_packages.extend(header.dependencies.iter().cloned());
+    }
 
-    // Handle --with packages: resolve + install into a cached env.
-    let with_library = if !with_packages.is_empty() {
+    // Script mode always builds an environment, even when the header declares
+    // no packages: an empty isolated library is still the right answer, and is
+    // not the same thing as falling back to whatever the machine provides.
+    let with_env = if with_packages.is_empty() && !script_mode {
+        None
+    } else {
         // The R version is part of the --with cache key (see ensure_with_env).
         // Falling back to a default here would collapse every R version into
         // one cache entry, silently reusing ABI-incompatible compiled
@@ -61,8 +97,17 @@ pub async fn run(
             )
         })?;
         Some(ensure_with_env(&with_packages, &r_ver).await?)
-    } else {
-        None
+    };
+
+    let (library, with_library) = match with_env {
+        // Script mode: the ephemeral environment replaces the project library
+        // rather than sitting in front of it, so the script cannot quietly
+        // satisfy an undeclared `library()` call from whatever happens to be
+        // installed on this machine and then fail on the next one.
+        // (`UVR_EXTRA_LIBS` is still appended by `REnv` — it is a deliberate
+        // per-machine escape hatch, not ambient project state.)
+        Some(env) if script_mode => (env, None),
+        env => (project_library.unwrap_or_else(fallback_library), env),
     };
 
     // The isolated environment — library search path, shadowed system
@@ -83,6 +128,29 @@ pub async fn run(
     // Belt and braces alongside the blank `R_ENVIRON`: a process flag is
     // available here, but not to a sourced activation script.
     cmd.arg("--no-environ");
+
+    if script_mode {
+        // Set here rather than in `REnv::vars()` for the same reason as
+        // `--no-environ` above: it is a property of *this* invocation, not of
+        // the isolated environment `uvr activate` also exports. Activation
+        // must never disable the user's startup profile.
+        //
+        // It is needed because environment variables alone do not isolate a
+        // headered script. R still sources a startup profile, and uvr's own
+        // project `.Rprofile` runs `.libPaths(unique(c(lib, .libPaths())))`,
+        // which puts the surrounding project's library *ahead* of the
+        // script's environment and quietly undoes the isolation the header
+        // exists to provide; `~/.Rprofile` can do the same for the machine at
+        // large. Pointing `R_PROFILE_USER` at the null device skips both, the
+        // same way the installer does (`installer/r_cmd_install.rs`).
+        //
+        // `R_PROFILE` (the *site* profile) is deliberately left alone — uvr
+        // writes its own OpenMP fix into a managed R's `Rprofile.site`.
+        cmd.env(
+            "R_PROFILE_USER",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        );
+    }
 
     if let Some(script_path) = &script {
         // Script mode — run as quietly as Rscript does. `Rscript foo.R` is
@@ -116,20 +184,63 @@ pub async fn run(
     Ok(())
 }
 
-/// Ensure the `--with` packages are installed in a cached environment.
-/// Returns the path to the cached library directory.
-async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf> {
-    // Compute a stable cache key from the sorted package list + R version.
-    let mut sorted = packages.to_vec();
-    sorted.sort();
+/// Read a script's inline dependency header (see [`script_header::parse`]).
+///
+/// An unreadable path yields `None` rather than an error: `uvr run` has always
+/// let R report a missing or unopenable script in its own words, and looking
+/// for a header is no reason to start intercepting that.
+fn read_header(path: &str) -> Result<Option<ScriptHeader>> {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    script_header::parse(&source).map_err(|e| anyhow!("Invalid script header in {path}: {e}"))
+}
+
+/// Library used when `uvr run` is invoked outside a project.
+fn fallback_library() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| {
+            // HOME-less environment (sandbox/CI): degrade to the system
+            // temp dir instead of dropping a library tree into the
+            // working directory (#161).
+            std::env::temp_dir()
+        })
+        .join("uvr")
+        .join("library")
+}
+
+/// Cache key for an ephemeral environment: the directory name under
+/// `<cache>/with-envs/`.
+///
+/// `packages` must already be sorted and de-duplicated, so the same set in
+/// any order — including a package named both in a header and via `--with` —
+/// reuses one environment. The R version is part of the key because compiled
+/// packages are ABI-bound to an R minor (#160).
+///
+/// **This function's output is a compatibility surface.** Changing it silently
+/// orphans every cached environment on every user's machine, so the tests pin
+/// a golden value — #182 generalises the header grammar and must keep a bare
+/// package name hashing exactly as it does now.
+fn with_env_key(packages: &[String], r_version: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(r_version.as_bytes());
-    for pkg in &sorted {
+    for pkg in packages {
         hasher.update(b"\0");
         hasher.update(pkg.as_bytes());
     }
-    let hash = format!("{:x}", hasher.finalize());
-    let short_hash = &hash[..12];
+    format!("{:x}", hasher.finalize())[..12].to_string()
+}
+
+/// Ensure the `--with` packages are installed in a cached environment.
+/// Returns the path to the cached library directory.
+async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf> {
+    let mut sorted = packages.to_vec();
+    sorted.sort();
+    // Same package from the header and `--with` (or listed twice) is one
+    // logical set — without this it would mint a second cache dir and
+    // install everything again.
+    sorted.dedup();
+    let short_hash = with_env_key(&sorted, r_version);
 
     let cache_dir = uvr_core::env_vars::cache_dir()
         .unwrap_or_else(|| {
@@ -146,6 +257,13 @@ async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf
         .join(short_hash);
 
     let lib_dir = cache_dir.join(".uvr").join("library");
+
+    // Created up front because both early exits below can skip the install
+    // that would otherwise make it: an already-warm cache, and a script whose
+    // header declares no packages at all. R must be handed a library path
+    // that exists either way.
+    std::fs::create_dir_all(&lib_dir)
+        .with_context(|| format!("Failed to create {}", lib_dir.display()))?;
 
     // Check if all requested packages are already installed.
     let all_installed = sorted
@@ -193,3 +311,53 @@ impl std::fmt::Display for ScriptExitError {
 }
 
 impl std::error::Error for ScriptExitError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(pkgs: &[&str], r: &str) -> String {
+        // Mirrors ensure_with_env's canonicalisation.
+        let mut sorted: Vec<String> = pkgs.iter().map(|s| s.to_string()).collect();
+        sorted.sort();
+        sorted.dedup();
+        with_env_key(&sorted, r)
+    }
+
+    #[test]
+    fn the_same_dependency_set_reuses_one_environment() {
+        // What "the ephemeral environment is cached and reused across runs of
+        // the same header" (#181) actually rests on.
+        assert_eq!(key(&["jsonlite"], "4.4.2"), key(&["jsonlite"], "4.4.2"));
+        // Declaration order must not fork the cache.
+        assert_eq!(key(&["a", "b"], "4.4.2"), key(&["b", "a"], "4.4.2"));
+        // Nor must a duplicate: the same package named in the header and via
+        // `--with` is one logical set, not a second environment.
+        assert_eq!(
+            key(&["jsonlite", "jsonlite"], "4.4.2"),
+            key(&["jsonlite"], "4.4.2")
+        );
+    }
+
+    #[test]
+    fn different_dependency_sets_get_different_environments() {
+        let base = key(&["jsonlite"], "4.4.2");
+        assert_ne!(base, key(&["cli"], "4.4.2"));
+        assert_ne!(base, key(&["jsonlite", "cli"], "4.4.2"));
+        assert_ne!(base, key(&[], "4.4.2"));
+        // ABI: compiled packages built for one R minor must not be reused
+        // under another (#160).
+        assert_ne!(base, key(&["jsonlite"], "4.5.1"));
+    }
+
+    #[test]
+    fn a_bare_package_name_still_hashes_to_its_established_key() {
+        // Golden value. `--with jsonlite` has resolved to this directory
+        // since the ephemeral-env cache shipped; #181 routes header
+        // dependencies through the same function, and #182 will generalise
+        // the grammar. Any change here orphans every user's cache, so this
+        // test exists to make that a deliberate decision rather than a
+        // side effect.
+        assert_eq!(key(&["jsonlite"], "4.4.2"), "c449740c65a0");
+    }
+}
