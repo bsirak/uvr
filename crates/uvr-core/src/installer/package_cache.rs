@@ -515,7 +515,11 @@ fn clone_dir_macos(src: &Path, dst: &Path) -> std::io::Result<()> {
 ///
 /// Returns `Err` on the first failure so the caller can fall back to a
 /// plain copy; partial output at `dst` is the caller's to clean up.
-pub fn hardlink_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+// Compiled on every platform so the tree-walking logic stays under test
+// everywhere (Windows gets the least local testing of any target), but the
+// only non-test caller is the Windows arm of `clone_to_library`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn hardlink_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

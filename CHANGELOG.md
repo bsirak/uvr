@@ -7,6 +7,26 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- A script's inline-header environment is no longer diverted by
+  `UVR_LIBRARY`. The two features collided: the ephemeral environment is
+  cache-owned, but the install inherited the override, so a user with
+  `UVR_LIBRARY` exported — the people that feature exists for — had the
+  script's declared packages installed into their shared library while R
+  was pointed at the empty cache directory. The script then failed, and
+  nothing pruned the packages left behind. Found by pre-tag review.
+
+- **R package builds no longer fail on HPC clusters with module-provided
+  BLAS/LAPACK** (PR #229, @gladkia). `R CMD INSTALL` subprocesses replaced
+  `LD_LIBRARY_PATH` with R's own lib dir, discarding the OpenBLAS/MKL/
+  FlexiBLAS paths an environment-module system had put there — installs
+  succeeded and then `library()` died on `libRlapack.so: cannot open shared
+  object file`. The path is now prepended rather than replaced, in
+  `R CMD INSTALL` and in the shared environment builder behind `uvr run`
+  and `uvr activate`, and `R_LD_LIBRARY_PATH` is set so R's own
+  byte-compilation children inherit it too — guarded on `libR.so` actually
+  being present, so it can't suppress the `ldpaths` default that portable
+  builds rely on to find their own `libR.so`.
+
 - **Windows warm syncs no longer copy every package** (#247): cache hits
   now hardlink each file into the project library instead of copying its
   bytes. macOS has cloned (copy-on-write) and Linux has symlinked since

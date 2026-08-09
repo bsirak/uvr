@@ -1108,6 +1108,50 @@ fn test_headered_script_runs_standalone_in_an_empty_directory() {
 
 #[test]
 #[ignore = "requires network access to CRAN/P3M and a managed R"]
+fn test_headered_script_env_is_not_hijacked_by_uvr_library() {
+    // Two features of this release collide here. `UVR_LIBRARY` (#97)
+    // redirects a project's library, and it is meant to be exported
+    // globally by people whose storage lives elsewhere. A script
+    // environment is ephemeral and cache-owned, so it must ignore that
+    // override entirely — otherwise the script's declared packages install
+    // into the user's shared library while R is pointed at the (empty)
+    // with-env dir, so the script fails *and* the shared library silently
+    // accumulates packages nothing will ever prune.
+    let dir = script_dir(
+        "# /// script\n\
+         # dependencies = [\"jsonlite\"]\n\
+         # ///\n\
+         cat(if (requireNamespace(\"jsonlite\", quietly = TRUE)) \"OK\" else \"MISSING\")\n",
+    );
+    let override_lib = TempDir::new().unwrap();
+    // A dedicated cache dir matters: `ensure_with_env` returns early when
+    // the env is already populated, so against a warm cache this test would
+    // pass without ever exercising the install path the bug lives in.
+    let cache = TempDir::new().unwrap();
+
+    uvr_cmd()
+        .args(["run", "script.R"])
+        .current_dir(dir.path())
+        .env("UVR_LIBRARY", override_lib.path())
+        .env("UVR_CACHE_DIR", cache.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("OK"));
+
+    // The override library must be untouched — not even the companion.
+    let leaked: Vec<_> = fs::read_dir(override_lib.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "script env leaked into UVR_LIBRARY: {leaked:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires network access to CRAN/P3M and a managed R"]
 fn test_headered_script_ignores_the_surrounding_project() {
     // Run the same script inside a project that declares a *different*
     // package. If the project library leaked onto the search path, the

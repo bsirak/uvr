@@ -293,8 +293,19 @@ async fn ensure_with_env(packages: &[String], r_version: &str) -> Result<PathBuf
         .context("Failed to write --with manifest")?;
 
     // Resolve and install.
+    //
+    // The library target is pinned explicitly rather than left to the
+    // project's own resolution: `Project::library_path()` honors
+    // `UVR_LIBRARY` (#97), and this throwaway project only exists to
+    // populate the ephemeral with-env cache. Without the override, a user
+    // with `UVR_LIBRARY` exported — the audience that feature is for —
+    // installs a script's declared packages into their shared library
+    // instead, and the script then fails because `lib_dir`, which is what
+    // R is actually pointed at, stays empty. Nothing prunes the shared
+    // library afterwards either, so the stray packages accumulate.
     let lockfile = crate::commands::lock::resolve_and_lock(&project, false).await?;
-    crate::commands::sync::install_from_lockfile(&project, &lockfile, 4, None, None).await?;
+    crate::commands::sync::install_from_lockfile(&project, &lockfile, 4, Some(&lib_dir), None)
+        .await?;
 
     Ok(lib_dir)
 }

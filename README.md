@@ -110,6 +110,7 @@ Install wall time (empty library, index caches warm). All tools use P3M as CRAN 
 - **Project-isolated** — every project gets its own `.uvr/library/`, never touching system R
 - **Full R version management** — `uvr r install 4.4.2`, `uvr r use >=4.3`, `uvr r pin 4.4.2`
 - **CRAN + Bioconductor + GitHub** — `uvr add DESeq2 --bioc`, `uvr add user/repo@main`
+- **Standalone scripts** — declare dependencies in a `# /// script` header and `uvr run script.R` anywhere, no project needed
 - **CI-ready** — `uvr sync --frozen` fails fast if the lockfile is stale; respects `NO_COLOR`
 - **Cross-platform** — macOS, Linux, and Windows with pre-built binaries for all three
 - **Written in Rust** — single static binary, no R or Python required to install
@@ -222,6 +223,7 @@ uvr tree
 | `uvr add <pkg...>` | Add packages, update manifest + lockfile, install |
 | `uvr remove <pkg...>` | Remove packages from manifest and re-lock |
 | `uvr sync` | Install all packages from the lockfile |
+| `uvr sync -v` | Show the resolved install plan first — each package's source and whether it installs from binary or source |
 | `uvr sync --frozen` | Like `sync`, but fail if the lockfile is stale (CI mode) |
 | `uvr sync --no-binary` | Build everything from source, ignoring pre-built binaries |
 | `uvr update [pkg...]` | Upgrade packages to latest allowed versions |
@@ -232,8 +234,9 @@ uvr tree
 | `uvr tree --depth 1` | Show only direct dependencies |
 | `uvr run [script.R]` | Run a script (or interactive R) with the project library active |
 | `uvr run --with pkg` | Run with extra packages available (not added to manifest) |
+| `uvr run script.R` | Run a standalone script from its inline `# /// script` dependency header — outside any project |
 | `uvr activate` | Print how to activate the project in your shell (`source .uvr/activate`) |
-| `uvr r install <ver>` | Download and install a specific R version to `~/.uvr/r-versions/` |
+| `uvr r install <ver>` | Download and install a specific R version to `~/.uvr/r-versions/` (override the location with `--install-dir`) |
 | `uvr r install devel` | Install a rolling channel — `devel` or `next`, rebuilt continuously and marked `[unstable]` (not reproducible; don't pin one) |
 | `uvr r list` | Show installed R versions |
 | `uvr r list --all` | Show all available R versions (fetched from the portable build index) |
@@ -249,6 +252,46 @@ uvr tree
 | `uvr cache clean` | Remove all cached package downloads |
 | `uvr cache clean --package <name>` | Remove cache entries for specific packages (repeatable, comma-separated) |
 | `uvr cache clean --r-version <minor>` | Remove extracted-package entries built for an R minor version (e.g. `4.5`) |
+
+---
+
+## Standalone scripts
+
+A script can declare its own dependencies in a header comment and run
+anywhere — no project, no `uvr.toml`, no lockfile:
+
+```r
+# /// script
+# dependencies = [
+#   "jsonlite",
+#   "praise",
+# ]
+# ///
+
+cat(praise::praise(), "\n")
+```
+
+```console
+$ cd /anywhere && uvr run analysis.R
+> Installing 2 package(s): 2 binary
+v Installed 2 package(s) in 1.75s
+You are epic!
+```
+
+The dependencies install into a cached environment keyed by the dependency
+set, so the second run of that script — or any other script wanting the same
+packages — starts immediately. Nothing is written next to the script.
+
+The header is the R analogue of Python's [PEP 723](https://peps.python.org/pep-0723/)
+inline script metadata, which `uv run` uses. It must start at column zero,
+may follow a shebang or banner comment, and takes plain package names today
+(version constraints, Bioconductor and git sources are planned). A malformed
+or duplicated header is an error naming the file and the problem, never
+silently ignored.
+
+Scripts run isolated from any project you happen to be standing in: the
+project library, its `.r-version` pin, and its `.Rprofile` are all bypassed,
+so a script behaves the same wherever it is invoked from.
 
 ---
 
