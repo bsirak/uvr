@@ -448,6 +448,24 @@
       flex-shrink: 0;
     }
 
+    /* Times for the comparison bars sit inside the bar, right-aligned, so
+       the eye reads bar-length and value together instead of tracking
+       across a gap. Only used where the bar is long enough to hold the
+       text — uvr's own bars are a few percent wide, so those keep their
+       label outside, which also makes the short bar read as the point. */
+    .bench-bar-inline {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: var(--sp-2);
+      overflow: hidden;
+    }
+
+    .bench-bar-inline .bench-bar-time {
+      color: var(--bg-primary);
+      opacity: 0.85;
+    }
+
     .bench-speedup {
       display: inline-flex;
       align-items: center;
@@ -1033,15 +1051,13 @@
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 47.8%;"></div>
-              <span class="bench-bar-time">413.7s</span>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 47.8%;"><span class="bench-bar-time">413.7s</span></div>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 100%;"></div>
-              <span class="bench-bar-time">865.3s</span>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 100%;"><span class="bench-bar-time">865.3s</span></div>
             </div>
           </div>
 
@@ -1067,17 +1083,15 @@
             </div>
           </div>
           <div class="bench-row">
-            <div class="bench-label">install.pkgs</div>
+            <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 100%;"></div>
-              <span class="bench-bar-time">112.6s</span>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 70.6%;"><span class="bench-bar-time">79.5s</span></div>
             </div>
           </div>
           <div class="bench-row">
-            <div class="bench-label">pak</div>
+            <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 70.6%;"></div>
-              <span class="bench-bar-time">79.5s</span>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 100%;"><span class="bench-bar-time">112.6s</span></div>
             </div>
           </div>
 
