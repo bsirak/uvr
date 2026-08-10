@@ -9,6 +9,28 @@
   <meta name="author" content="nbafrank">
   <link rel="canonical" href="https://nbafrank.github.io/uvr/">
 
+  <!-- Structured data: makes the page eligible for software rich results,
+       and states the facts (license, platforms, price) that search engines
+       otherwise have to guess at from prose. -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "uvr",
+    "applicationCategory": "DeveloperApplication",
+    "applicationSubCategory": "Package manager",
+    "description": "A fast R package and project manager written in Rust. Manages the R version, a uvr.toml manifest, a uvr.lock lockfile, and a per-project isolated library, installing from pre-built P3M binaries.",
+    "operatingSystem": "macOS, Linux, Windows",
+    "url": "https://nbafrank.github.io/uvr/",
+    "downloadUrl": "https://github.com/nbafrank/uvr/releases/latest",
+    "softwareVersion": "0.4.6",
+    "license": "https://opensource.org/licenses/MIT",
+    "programmingLanguage": "Rust",
+    "codeRepository": "https://github.com/nbafrank/uvr",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+
   <!-- Favicon (reuse the hex logo until a favicon-optimized asset is ready) -->
   <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/nbafrank/uvr/main/r-package/man/figures/logo.png?v=2">
   <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/nbafrank/uvr/main/r-package/man/figures/logo.png?v=2">
@@ -976,13 +998,51 @@
         <div class="section-label">Performance</div>
         <h2 class="section-title">Install benchmarks</h2>
         <p class="section-desc">
-          Parallel downloads, global package cache with CoW cloning, no R process for binary installs.
-          macOS arm64, R&nbsp;4.5, P3M binaries. Median of 5 runs, index caches warm.
+          Parallel downloads, global package cache, no R process for binary installs.
+          Cold install onto a clean machine — empty library, empty caches — in the pinned
+          benchmark container (Linux&nbsp;x86_64, R&nbsp;4.5.3), with P3M binaries available
+          to every tool. Median of 3 runs.
           <strong>First-install comparison:</strong> uvr pre-resolves deps via <code>uvr lock</code> (separate step) and only <code>uvr sync</code> (install) is timed; <code>install.packages</code>/<code>pak</code>/<code>renv</code> resolve + install inline.
           For a like-for-like lockfile-restore comparison, see <code>pak::lockfile_install()</code> and <code>renv::restore()</code>.
         </p>
       </div>
       <div class="bench-grid">
+        <!-- tidyverse -->
+        <div class="bench-card">
+          <div class="bench-card-title">tidyverse</div>
+          <div class="bench-card-subtitle">100 packages</div>
+
+          <div class="bench-row">
+            <div class="bench-label bench-label-uvr">uvr</div>
+            <div class="bench-bar-track">
+              <div class="bench-bar bench-bar-uvr" style="width: 0.7%;"></div>
+              <span class="bench-bar-time">6.1s</span>
+            </div>
+          </div>
+          <div class="bench-row">
+            <div class="bench-label">renv</div>
+            <div class="bench-bar-track">
+              <div class="bench-bar bench-bar-other" style="width: 9.2%;"></div>
+              <span class="bench-bar-time">79.8s</span>
+            </div>
+          </div>
+          <div class="bench-row">
+            <div class="bench-label">pak</div>
+            <div class="bench-bar-track">
+              <div class="bench-bar bench-bar-other" style="width: 47.8%;"></div>
+              <span class="bench-bar-time">413.7s</span>
+            </div>
+          </div>
+          <div class="bench-row">
+            <div class="bench-label">install.pkgs</div>
+            <div class="bench-bar-track">
+              <div class="bench-bar bench-bar-other" style="width: 100%;"></div>
+              <span class="bench-bar-time">865.3s</span>
+            </div>
+          </div>
+
+          <div class="bench-speedup">142x faster than install.packages()</div>
+        </div>
         <!-- ggplot2 -->
         <div class="bench-card">
           <div class="bench-card-title">ggplot2</div>
@@ -991,71 +1051,35 @@
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 1.6%;"></div>
-              <span class="bench-bar-time">0.21s</span>
+              <div class="bench-bar bench-bar-uvr" style="width: 4.3%;"></div>
+              <span class="bench-bar-time">4.8s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 4.1%;"></div>
-              <span class="bench-bar-time">0.54s</span>
+              <div class="bench-bar bench-bar-other" style="width: 14.1%;"></div>
+              <span class="bench-bar-time">15.9s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 33.6%;"></div>
-              <span class="bench-bar-time">4.4s</span>
+              <div class="bench-bar bench-bar-other" style="width: 100%;"></div>
+              <span class="bench-bar-time">112.6s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 42.9%;"></div>
-              <span class="bench-bar-time">5.6s</span>
+              <div class="bench-bar bench-bar-other" style="width: 70.6%;"></div>
+              <span class="bench-bar-time">79.5s</span>
             </div>
           </div>
 
-          <div class="bench-speedup">21x faster than install.packages() (first install)</div>
+          <div class="bench-speedup">23x faster than install.packages()</div>
         </div>
 
-        <!-- tidyverse -->
-        <div class="bench-card">
-          <div class="bench-card-title">tidyverse</div>
-          <div class="bench-card-subtitle">99 packages</div>
-
-          <div class="bench-row">
-            <div class="bench-label bench-label-uvr">uvr</div>
-            <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 2.1%;"></div>
-              <span class="bench-bar-time">0.27s</span>
-            </div>
-          </div>
-          <div class="bench-row">
-            <div class="bench-label">renv</div>
-            <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 6.3%;"></div>
-              <span class="bench-bar-time">0.82s</span>
-            </div>
-          </div>
-          <div class="bench-row">
-            <div class="bench-label">pak</div>
-            <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 61.9%;"></div>
-              <span class="bench-bar-time">8.1s</span>
-            </div>
-          </div>
-          <div class="bench-row">
-            <div class="bench-label">install.pkgs</div>
-            <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 90%;"></div>
-              <span class="bench-bar-time">11.8s</span>
-            </div>
-          </div>
-
-          <div class="bench-speedup">44x faster than install.packages() (first install)</div>
-        </div>
       </div>
     </div>
   </section>
