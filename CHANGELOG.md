@@ -7,6 +7,20 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+## v0.4.6 (2026-08-10)
+
+Standalone scripts land: a `.R` file can now declare its own dependencies
+in a header comment and run anywhere, with no project, manifest, or
+lockfile — the first slice of F1 from the uv-parity roadmap, and the
+feature that most distinguishes uvr from the alternatives. Alongside it:
+faster warm syncs on every platform (Windows stops copying packages,
+Linux source caching works at all for the first time), R installs you can
+place where you want, and an install plan you can inspect before it runs.
+
+Two adversarial reviews ran before this tag. One found that two features
+in this very batch broke each other — script environments were diverted
+by `UVR_LIBRARY` — which is fixed here and covered by a regression test.
+
 - A script's inline-header environment is no longer diverted by
   `UVR_LIBRARY`. The two features collided: the ephemeral environment is
   cache-owned, but the install inherited the override, so a user with
