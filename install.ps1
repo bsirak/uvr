@@ -59,18 +59,19 @@ function Get-ExpectedHash {
     try {
         Invoke-WebRequest -Uri "$BaseUrl/sha256sums.txt" -OutFile $sumsPath -UseBasicParsing
     } catch {
-        Write-Log "Warning: sha256sums.txt not found, skipping checksum verification"
-        return $null
+        Write-ErrExit "Could not fetch sha256sums.txt: $_"
     }
     $line = Select-String -Path $sumsPath -Pattern ([Regex]::Escape($Asset)) | Select-Object -First 1
     if (-not $line) {
-        Write-Log "Warning: no checksum entry for $Asset, skipping checksum verification"
-        return $null
+        Write-ErrExit "sha256sums.txt does not list $Asset"
     }
     return ($line.Line -split "\s+")[0]
 }
 
 function Add-ToUserPath {
+    # Writes straight to the registry so open programs, including this
+    # shell, won't see the change until they restart -- this does not
+    # broadcast WM_SETTINGCHANGE the way the Settings app does.
     param([string]$Dir)
     $key = "HKCU:\Environment"
     $raw = (Get-Item $key).GetValue("Path", "", "DoNotExpandEnvironmentNames")
@@ -94,7 +95,11 @@ function main {
     $target = Get-Target
     Write-Log "Detected platform: $target"
 
-    $version = if ($env:UVR_VERSION) { $env:UVR_VERSION } else { Get-LatestVersion }
+    $version = if ($env:UVR_VERSION) {
+        if ($env:UVR_VERSION -match '^v') { $env:UVR_VERSION } else { "v$env:UVR_VERSION" }
+    } else {
+        Get-LatestVersion
+    }
     Write-Log "Installing uvr $version"
 
     $asset = "uvr-$target.zip"
@@ -112,14 +117,12 @@ function main {
         }
 
         $expected = Get-ExpectedHash -BaseUrl $baseUrl -Asset $asset -TmpDir $tmpDir
-        if ($expected) {
-            Write-Log "Verifying checksum..."
-            $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
-            if ($expected.ToLower() -ne $actual) {
-                Write-ErrExit "Checksum mismatch!`n  Expected: $expected`n  Got: $actual"
-            }
-            Write-Log "Checksum verified"
+        Write-Log "Verifying checksum..."
+        $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+        if ($expected.ToLower() -ne $actual) {
+            Write-ErrExit "Checksum mismatch!`n  Expected: $expected`n  Got: $actual"
         }
+        Write-Log "Checksum verified"
 
         Write-Log "Extracting..."
         Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
