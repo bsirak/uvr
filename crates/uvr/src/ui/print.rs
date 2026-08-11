@@ -101,6 +101,22 @@ pub fn bullet_dim(text: impl std::fmt::Display) {
     println!("  {} {}", palette::dim(glyph::bullet()), palette::dim(text));
 }
 
+/// Dim continuation line under a [`bullet_err`], indented one level further:
+/// `      <text>`. For annotating a listed item without competing with it —
+/// the sysreqs consent block uses it to tag each command's provenance and
+/// what it does.
+pub fn sub_err(text: impl std::fmt::Display) {
+    eprintln!("      {}", palette::dim(text));
+}
+
+/// Dim line at [`bullet_err`] indentation but with no bullet glyph:
+/// `  <text>`. For a remark about a stderr list as a whole — at bullet
+/// depth it cannot be misread as an annotation of the last item the way a
+/// [`sub_err`] would be.
+pub fn note_err(text: impl std::fmt::Display) {
+    eprintln!("  {}", palette::dim(text));
+}
+
 /// `<glyph> <pkg-name> <version>` — a single row in a change list.
 pub fn row(glyph_str: console::StyledObject<&str>, name: &str, version: &str) {
     println!(

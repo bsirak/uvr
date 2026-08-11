@@ -1113,42 +1113,26 @@ async fn install_from_lockfile_with_r(
                                 // setup commands here too rather than handing
                                 // the user a line that fails when pasted.
                                 for cmd in &check.pre_install {
-                                    ui::hint(format!("First run: {cmd}"));
+                                    ui::hint(format!("First run: {}", cmd.command));
                                 }
                                 ui::hint(&install_hint);
                                 for cmd in &check.post_install {
-                                    ui::hint(format!("Then run: {cmd}"));
+                                    ui::hint(format!("Then run: {}", cmd.command));
                                 }
                                 ui::hint("Or run uvr as root in this container.");
                             }
                             (true, Some((install_program, install_args))) => {
-                                // Full disclosure before consent: the prompt
-                                // below only names the package-manager
-                                // command, but answering yes also authorises
-                                // every pre_install/post_install command a
-                                // rule carries (repo enablement, `R CMD
-                                // javareconf`, etc.). Show the whole plan
-                                // first — unconditionally, since
-                                // `confirm_sysreqs_install` proceeds without
-                                // prompting on a non-TTY — so nothing runs
-                                // without having been shown.
-                                //
-                                // On stderr, deliberately: the confirmation
-                                // prompt is written to stderr, so a stdout
-                                // disclosure would vanish under
-                                // `uvr sync --install-system-deps > build.log`
-                                // and leave the user consenting to a prompt
-                                // that names only the package-manager command.
-                                if !check.pre_install.is_empty() || !check.post_install.is_empty() {
-                                    ui::info_err("The following will run:");
-                                    for cmd in &check.pre_install {
-                                        ui::bullet_err(cmd);
-                                    }
-                                    ui::bullet_err(&install_cmd_display);
-                                    for cmd in &check.post_install {
-                                        ui::bullet_err(cmd);
-                                    }
-                                }
+                                // Before consent, not after: the prompt below
+                                // names only the package-manager command, but
+                                // answering yes also authorises every
+                                // pre_install/post_install command a rule
+                                // carries. See `print_sysreqs_disclosure` for
+                                // what it prints and why it prints it there.
+                                print_sysreqs_disclosure(
+                                    &check.pre_install,
+                                    &install_cmd_display,
+                                    &check.post_install,
+                                );
                                 if confirm_sysreqs_install(&install_cmd_display)? {
                                     // Refresh the package index first where the
                                     // manager needs it: fresh openSUSE/Arch
@@ -1224,11 +1208,11 @@ async fn install_from_lockfile_with_r(
                             }
                             (false, _) => {
                                 for cmd in &check.pre_install {
-                                    ui::hint(format!("First run: {cmd}"));
+                                    ui::hint(format!("First run: {}", cmd.command));
                                 }
                                 ui::hint(&install_hint);
                                 for cmd in &check.post_install {
-                                    ui::hint(format!("Then run: {cmd}"));
+                                    ui::hint(format!("Then run: {}", cmd.command));
                                 }
                                 ui::hint(
                                     "Or set --install-system-deps / UVR_INSTALL_SYSREQS=1 to let uvr run that for you.",
@@ -1936,7 +1920,7 @@ const ROOT_SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 /// `--install-system-deps`).
 #[cfg(target_os = "linux")]
 fn run_rule_commands(
-    cmds: &[String],
+    cmds: &[uvr_core::sysreqs::SetupCommand],
     phase: &str,
     r_bin_dir: Option<&std::path::Path>,
     bail_on_failure: bool,
@@ -1944,7 +1928,7 @@ fn run_rule_commands(
     let needs_sudo = !is_effective_root();
     // Deliberately NOT `std::env::var("PATH")`: see the security note above.
     let path_env = r_bin_dir.map(|dir| format!("{}:{ROOT_SAFE_PATH}", dir.display()));
-    for cmd in cmds {
+    for cmd in cmds.iter().map(|c| &c.command) {
         // stderr: this is the audit line for a privileged command, and it
         // belongs with the disclosure and the prompt that preceded it.
         ui::info_err(format!("Running: {cmd}"));
@@ -1976,6 +1960,67 @@ fn run_rule_commands(
     }
     Ok(())
 }
+
+/// Print the full plan before `confirm_sysreqs_install` asks for consent.
+///
+/// Every command is listed with two annotations, because a user approving
+/// root execution is answering two different questions and the block used
+/// to answer neither:
+///
+/// - **source** — a vendored command is a compile-time constant from the
+///   reviewed `vendor/r-system-requirements` snapshot; a `Posit's sysreqs
+///   API` one arrived over the network during this sync. On Ubuntu and the
+///   RHEL family the API answers, so that is most users.
+/// - **note** — what the command actually does. Provenance alone would be
+///   actively misleading here: `curl … https://sh.rustup.rs | sh` and
+///   `dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/…` are
+///   *vendored*, and "vendored" means a human reviewed the rule, not that
+///   they vouched for what it does at runtime.
+///
+/// The closing line says outright that an unannotated command is one uvr
+/// recognised no pattern in rather than one it has cleared, so the notes
+/// are not read as a whitelist. Everything goes to stderr, where
+/// `confirm_sysreqs_install` prompts, so redirecting stdout to a build log
+/// cannot separate the consent from what it covers.
+///
+/// Unconditional: `confirm_sysreqs_install` returns `true` without
+/// prompting on a non-TTY, so printing this only when a prompt will appear
+/// would leave CI runs with no record of what ran as root.
+#[cfg(target_os = "linux")]
+fn print_sysreqs_disclosure(
+    pre_install: &[uvr_core::sysreqs::SetupCommand],
+    install_cmd_display: &str,
+    post_install: &[uvr_core::sysreqs::SetupCommand],
+) {
+    if pre_install.is_empty() && post_install.is_empty() {
+        // Nothing but the package-manager command, which the prompt itself
+        // names in full — a disclosure block would only repeat it.
+        return;
+    }
+    ui::info_err("The following will run as root:");
+    let describe = |cmd: &uvr_core::sysreqs::SetupCommand| {
+        ui::bullet_err(&cmd.command);
+        ui::sub_err(format!("source: {}", cmd.source.label()));
+        let effects = cmd.effects();
+        if !effects.is_empty() {
+            let notes: Vec<&str> = effects.iter().map(|e| e.label()).collect();
+            ui::sub_err(format!("note: {}", notes.join("; ")));
+        }
+    };
+    for cmd in pre_install {
+        describe(cmd);
+    }
+    // uvr builds this one itself from the resolved package names, so it has
+    // no rule provenance to report and needs no note.
+    ui::bullet_err(install_cmd_display);
+    for cmd in post_install {
+        describe(cmd);
+    }
+    ui::note_err(
+        "Commands without a note are ones uvr matched no pattern in, not ones it has vetted.",
+    );
+}
+
 /// Prompt before invoking the system package manager. Same TTY-only
 /// pattern as `confirm_library_wipe` — non-interactive sessions
 /// (CI, scripts) proceed without prompting since the user opted in via
