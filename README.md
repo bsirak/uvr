@@ -10,9 +10,21 @@ A fast R package and project manager, written in Rust.
 
 `uvr` brings uv-style project management to R: a `uvr.toml` manifest, a reproducible `uvr.lock` lockfile, and a per-project isolated library. Packages install from pre-built [P3M](https://packagemanager.posit.co/) binaries by default — no compilation, no waiting — with automatic fallback to CRAN source. R versions are managed per-project with no `sudo` required.
 
-```sh
-$ curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh
+1.  Linux / MacOS
 
+    ``` sh
+    curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | sh
+    ```
+
+2.  Windows
+
+    ``` powershell
+    irm https://raw.githubusercontent.com/nbafrank/uvr/main/install.ps1 | iex
+    ```
+
+Here's a following demo of `uvr`: 
+
+``` sh
 $ uvr init my-analysis
 $ uvr add ggplot2 dplyr tidymodels
 $ uvr sync          # installs from lockfile, idempotent
@@ -43,7 +55,7 @@ R has several package management tools — `renv`, `pak`, `rv`, `rig` — each s
 
 Here is how existing tools compare and where the gaps are:
 
-- **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not manage R versions ("renv tracks, but doesn't help with, the version of R used") and relies on `install.packages()` under the hood, which is slow and requires compilation on Linux.
+- **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not pin R versions ("renv tracks, but doesn't help with, the version of R used") and relies on `install.packages()` under the hood, which is slow and requires compilation on Linux.
 - **pak** — fast parallel installs and good system dependency detection, but no lockfile and no R version management. A great complement to renv, not a replacement.
 - **rv** — the closest prior art: Rust-based, declarative, fast. It focuses on package resolution. It does not manage R installations, and `rv run` is not yet available.
 - **rig** — excellent R version manager. No package management or lockfile. Requires admin rights on Windows.
@@ -131,6 +143,12 @@ This auto-detects your platform, downloads the binary, verifies the SHA256 check
 curl -fsSL https://raw.githubusercontent.com/nbafrank/uvr/main/install.sh | UVR_INSTALL_DIR=/usr/local/bin sh
 ```
 
+You can quick install on Windows as well with the following Powershell command:
+
+``` bash
+irm https://raw.githubusercontent.com/nbafrank/uvr/main/install.ps1 | iex
+```
+
 ### Manual download
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/nbafrank/uvr/releases/latest):
@@ -153,7 +171,7 @@ curl -fsSL https://github.com/nbafrank/uvr/releases/latest/download/uvr-aarch64-
 sudo mv uvr /usr/local/bin/
 ```
 
-On Windows, download `uvr-x86_64-pc-windows-msvc.zip` from the releases page and add `uvr.exe` to your PATH.
+On Windows, download `uvr-x86_64-pc-windows-msvc.zip` from the releases page and add `uvr.exe` to your PATH. 
 
 ### From R
 
