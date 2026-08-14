@@ -220,6 +220,7 @@ uvr add ggplot2 dplyr
 uvr add DESeq2 --bioc
 uvr add tidymodels@>=1.0.0
 uvr add user/repo@main
+uvr add 'user/monorepo@main#subdirectory=packages/nestedPkg'
 
 # Install everything from the lockfile
 uvr sync
@@ -230,6 +231,14 @@ uvr run analysis.R -- --input data.csv
 # See what you have
 uvr tree
 ```
+
+GitHub package directories also propagate through supported DESCRIPTION
+`Remotes:` entries, including `owner/repo/subdir@ref` and
+`owner/repo:subdir@ref`. This traversal follows the source chain: only a
+package already selected from a manifest Git source can introduce another
+remote source; ordinary registry packages cannot inject remote URLs. Bound
+aliases and subdirectory targets fail rather than falling back to a registry
+or to the repository root.
 
 ---
 
@@ -434,10 +443,13 @@ ggplot2 = ">=3.0.0"
 dplyr = "*"
 DESeq2 = { bioc = true }
 myPkg = { git = "user/repo", rev = "main" }
+nestedPkg = { git = "user/monorepo", rev = "main", subdirectory = "packages/nestedPkg" }
 
 [dev-dependencies]
 testthat = "*"
 ```
+
+Generated or imported git entries may also carry `exact = true`, which preserves an explicit DESCRIPTION `PackageName=` alias and requires the fetched DESCRIPTION `Package:` field to match the manifest dependency name.
 
 ---
 
