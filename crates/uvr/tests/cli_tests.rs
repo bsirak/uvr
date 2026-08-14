@@ -244,6 +244,46 @@ fn test_manifest_round_trip() {
     assert!(m.dependencies.contains_key("ggplot2"));
 }
 
+#[test]
+fn test_add_no_lock_writes_github_subdirectory_dependency() {
+    let dir = init_project("subdir-add");
+    uvr_cmd()
+        .args([
+            "add",
+            "--no-lock",
+            "owner/repo@v1.0#subdirectory=pkgs/nested",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let m: uvr_core::manifest::Manifest = content.parse().unwrap();
+    let dep = m.dependencies.get("nested").expect("nested dependency");
+    assert_eq!(dep.git(), Some("owner/repo"));
+    assert_eq!(dep.subdirectory(), Some("pkgs/nested"));
+    assert!(
+        content.contains(r#"subdirectory = "pkgs/nested""#),
+        "{content}"
+    );
+    assert!(content.contains(r#"rev = "v1.0""#), "{content}");
+    assert!(!dir.path().join("uvr.lock").exists());
+}
+
+#[test]
+fn test_add_rejects_an_unsafe_subdirectory_fragment() {
+    let dir = init_project("subdir-reject");
+    uvr_cmd()
+        .args(["add", "--no-lock", "owner/repo#subdirectory=../escape"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("subdirectory"));
+
+    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    assert!(!content.contains("escape"), "{content}");
+}
+
 // ─── import ────────────────────────────────────────────────
 
 #[test]

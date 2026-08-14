@@ -3,11 +3,10 @@ use tracing::debug;
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
-use crate::manifest::DependencySpec;
-use crate::registry::{Dep, PackageInfo};
+use crate::registry::PackageInfo;
 
-/// A gitlab-sourced dependency declared in another package's `Remotes:`
-/// field. `(dep_name, "gitlab::host/group/.../project", optional_ref)`.
+/// Legacy tuple form for a GitLab-sourced `Remotes:` dependency:
+/// `(dep_name, "gitlab::host/group/.../project", optional_ref)`.
 pub type GitlabRemote = (String, String, Option<String>);
 
 /// A validated GitLab spec. Unlike Forgejo/GitHub, GitLab projects
@@ -49,6 +48,7 @@ impl GitlabSpec {
 /// - empty host or any empty path segment
 /// - fewer than two path segments (need at least a namespace + project)
 /// - host chars outside `[alnum].-:` or path-segment chars outside `[alnum].-_`
+/// - GitLab's `group/project/-/subdirectory` package-directory form
 /// - refs containing whitespace or URL/git metacharacters (`& # ? * ...`),
 ///   per [`crate::registry::github::is_valid_git_ref`]
 pub fn parse_gitlab_parts(spec: &str) -> Option<GitlabSpec> {
@@ -57,22 +57,15 @@ pub fn parse_gitlab_parts(spec: &str) -> Option<GitlabSpec> {
     let (path_part, git_ref) = match body.rfind('@') {
         Some(at) => {
             let r = &body[at + 1..];
-            let git_ref = if r.is_empty() {
-                None
-            } else {
-                // Refs with `&`, `#`, `?`, whitespace, etc. would mis-parse
-                // the registry API request — reject at parse time.
-                if !crate::registry::github::is_valid_git_ref(r) {
-                    return None;
-                }
-                Some(r.to_string())
-            };
-            (&body[..at], git_ref)
+            if !crate::registry::github::is_valid_git_ref(r) {
+                return None;
+            }
+            (&body[..at], Some(r.to_string()))
         }
         None => (body, None),
     };
 
-    if path_part.contains("://") {
+    if path_part.contains("://") || path_part.contains("/-/") {
         return None;
     }
 
@@ -153,34 +146,95 @@ pub fn gitlab_token(host: &str) -> Option<String> {
     None
 }
 
-/// Resolve a GitLab-hosted R package: fetch commit SHA, fetch DESCRIPTION,
-/// build a tarball URL for the lockfile.
+/// Resolve a GitLab-hosted R package while deliberately discarding rich
+/// `Remotes:` entries before the fallible legacy-tuple adapter.
 pub async fn resolve_gitlab_package(
     client: &reqwest::Client,
     host: &str,
     project_path: &str,
     git_ref: &str,
 ) -> Result<PackageInfo> {
-    resolve_gitlab_package_with_remotes(client, host, project_path, git_ref)
+    resolve_gitlab_package_with_remote_entries(client, host, project_path, git_ref)
         .await
         .map(|(info, _)| info)
 }
 
-/// Resolve a GitLab package and return its `Remotes:`-declared gitlab deps,
-/// so callers can walk transitive gitlab→gitlab chains during `uvr lock`.
+/// Legacy tuple adapter for a GitLab package's `Remotes:` entries. Nested or
+/// bound-unsupported entries return an error rather than losing identity.
 pub async fn resolve_gitlab_package_with_remotes(
     client: &reqwest::Client,
     host: &str,
     project_path: &str,
     git_ref: &str,
 ) -> Result<(PackageInfo, Vec<GitlabRemote>)> {
-    // GitLab's `:id` path parameter accepts a URL-encoded `namespace/path`
-    // in place of the numeric project ID — encode the full nested path
-    // (`urlencoding::encode` turns `/` into `%2F`, which is what the
-    // project-path form requires).
-    let project_id = urlencoding::encode(project_path).into_owned();
-    let commit_sha = fetch_commit_sha(client, host, &project_id, project_path, git_ref).await?;
+    let (info, remotes) =
+        resolve_gitlab_package_with_remote_entries(client, host, project_path, git_ref).await?;
+    Ok((info, compatible_remotes(remotes)?))
+}
 
+pub async fn resolve_gitlab_package_with_remote_entries(
+    client: &reqwest::Client,
+    host: &str,
+    project_path: &str,
+    git_ref: &str,
+) -> Result<(PackageInfo, Vec<crate::manifest::RemoteEntry>)> {
+    resolve_gitlab_package_with_remote_entries_bound(client, host, project_path, git_ref, false)
+        .await
+}
+
+pub async fn resolve_gitlab_package_with_remote_entries_bound(
+    client: &reqwest::Client,
+    host: &str,
+    project_path: &str,
+    git_ref: &str,
+    require_declared_name: bool,
+) -> Result<(PackageInfo, Vec<crate::manifest::RemoteEntry>)> {
+    let commit_sha = fetch_commit_sha(client, host, project_path, git_ref).await?;
+    resolve_gitlab_package_with_remote_entries_at_commit_bound(
+        client,
+        host,
+        project_path,
+        &commit_sha,
+        require_declared_name,
+    )
+    .await
+}
+
+pub async fn resolve_gitlab_package_with_remote_entries_at_commit_bound(
+    client: &reqwest::Client,
+    host: &str,
+    project_path: &str,
+    commit_sha: &str,
+    require_declared_name: bool,
+) -> Result<(PackageInfo, Vec<crate::manifest::RemoteEntry>)> {
+    let (info, remotes, _) =
+        resolve_gitlab_package_with_remote_entries_and_install_dependencies_at_commit_bound(
+            client,
+            host,
+            project_path,
+            commit_sha,
+            require_declared_name,
+        )
+        .await?;
+    Ok((info, remotes))
+}
+
+/// Resolve a GitLab package while also returning every install-time
+/// DESCRIPTION dependency name used to bind nested GitHub `Remotes:` entries.
+/// `PackageInfo::requires` deliberately retains GitLab's existing
+/// Imports/Depends-only behavior.
+pub async fn resolve_gitlab_package_with_remote_entries_and_install_dependencies_at_commit_bound(
+    client: &reqwest::Client,
+    host: &str,
+    project_path: &str,
+    commit_sha: &str,
+    require_declared_name: bool,
+) -> Result<(
+    PackageInfo,
+    Vec<crate::manifest::RemoteEntry>,
+    std::collections::BTreeSet<String>,
+)> {
+    let project_id = urlencoding::encode(project_path);
     let desc_url = format!(
         "https://{host}/api/v4/projects/{project_id}/repository/files/DESCRIPTION/raw?ref={commit_sha}"
     );
@@ -196,7 +250,7 @@ pub async fn resolve_gitlab_package_with_remotes(
             desc_resp.status(),
             host,
             project_path,
-            &commit_sha,
+            commit_sha,
         ));
     }
     let desc_text = desc_resp.text().await?;
@@ -205,10 +259,14 @@ pub async fn resolve_gitlab_package_with_remotes(
     let project_name = project_path
         .rsplit_once('/')
         .map_or(project_path, |(_, name)| name);
-    let pkg_name = desc_fields
-        .get("Package")
-        .cloned()
-        .unwrap_or_else(|| project_name.to_string());
+    let pkg_name = description_package_name(
+        &desc_fields,
+        host,
+        project_path,
+        project_name,
+        commit_sha,
+        require_declared_name,
+    )?;
     let pkg_version = desc_fields
         .get("Version")
         .cloned()
@@ -216,14 +274,16 @@ pub async fn resolve_gitlab_package_with_remotes(
     let version = Version::parse(&crate::resolver::normalize_version(&pkg_version))
         .unwrap_or_else(|_| Version::new(0, 0, 0));
 
-    let requires = parse_description_deps(&desc_fields);
-    let remotes = parse_gitlab_remotes(&desc_fields);
+    let requires = crate::registry::github::parse_description_runtime_deps(&desc_fields);
+    let install_dependencies =
+        crate::registry::github::parse_description_install_dependency_names(&desc_fields);
+    let remotes = parse_gitlab_remote_entries(&desc_fields);
 
     let url = format!(
         "https://{host}/api/v4/projects/{project_id}/repository/archive.tar.gz?sha={commit_sha}"
     );
 
-    debug!("GitLab {host}/{project_path}@{git_ref} → {pkg_name} {version} ({commit_sha})");
+    debug!("GitLab {host}/{project_path}@{commit_sha} → {pkg_name} {version}");
 
     Ok((
         PackageInfo {
@@ -237,12 +297,57 @@ pub async fn resolve_gitlab_package_with_remotes(
             url,
             raw_version: None,
             system_requirements: None,
+            subdirectory: None,
         },
         remotes,
+        install_dependencies,
     ))
 }
 
-async fn fetch_commit_sha(
+fn description_package_name(
+    fields: &std::collections::BTreeMap<String, String>,
+    host: &str,
+    project_path: &str,
+    project_name: &str,
+    commit_sha: &str,
+    require_declared_name: bool,
+) -> Result<String> {
+    if !require_declared_name {
+        return Ok(fields
+            .get("Package")
+            .cloned()
+            .unwrap_or_else(|| project_name.to_string()));
+    }
+    let name = fields
+        .get("Package")
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            UvrError::Other(format!(
+                "DESCRIPTION for GitLab {host}/{project_path}@{commit_sha} has no `Package:` \
+                 field; cannot validate the bound package identity."
+            ))
+        })?;
+    if !crate::package_name::is_valid(&name) {
+        return Err(UvrError::Other(format!(
+            "DESCRIPTION for GitLab {host}/{project_path}@{commit_sha} declares an invalid \
+             `Package:` name '{name}'."
+        )));
+    }
+    Ok(name)
+}
+
+pub async fn fetch_commit_sha(
+    client: &reqwest::Client,
+    host: &str,
+    project_path: &str,
+    git_ref: &str,
+) -> Result<String> {
+    let project_id = urlencoding::encode(project_path);
+    fetch_commit_sha_by_id(client, host, &project_id, project_path, git_ref).await
+}
+
+async fn fetch_commit_sha_by_id(
     client: &reqwest::Client,
     host: &str,
     project_id: &str,
@@ -308,43 +413,24 @@ fn map_gitlab_error(
     }
 }
 
+#[cfg(test)]
 fn parse_gitlab_remotes(
     desc_fields: &std::collections::BTreeMap<String, String>,
-) -> Vec<GitlabRemote> {
-    // Return ALL git-bearing entries — github, forgejo, and gitlab alike.
-    // The lock-time BFS dispatches by prefix via `classify_git`, so a
-    // gitlab package whose DESCRIPTION declares `Remotes: github::user/repo`
-    // walks correctly into the github registry. Mirrors
-    // `forgejo::parse_forgejo_remotes` / `github::parse_github_remotes`.
+) -> Result<Vec<GitlabRemote>> {
+    compatible_remotes(parse_gitlab_remote_entries(desc_fields))
+}
+
+fn parse_gitlab_remote_entries(
+    desc_fields: &std::collections::BTreeMap<String, String>,
+) -> Vec<crate::manifest::RemoteEntry> {
     let Some(remotes_field) = desc_fields.get("Remotes") else {
         return Vec::new();
     };
-    crate::manifest::parse_remotes_field(remotes_field)
-        .into_iter()
-        .filter_map(|(name, spec)| match spec {
-            DependencySpec::Detailed(d) => d.git.map(|repo| (name, repo, d.rev)),
-            DependencySpec::Version(_) => None,
-        })
-        .collect()
+    crate::manifest::parse_remotes_field_rich(remotes_field)
 }
 
-/// Same shape as `github::parse_description_deps` — small enough that
-/// reusing it via a shared helper isn't worth the cross-module coupling.
-fn parse_description_deps(fields: &std::collections::BTreeMap<String, String>) -> Vec<Dep> {
-    let mut deps = Vec::new();
-    for field in &["Imports", "Depends"] {
-        if let Some(value) = fields.get(*field) {
-            for d in crate::registry::cran::parse_dep_field(value) {
-                if !crate::resolver::is_base_package(&d.name) {
-                    deps.push(Dep {
-                        name: d.name,
-                        constraint: d.req.as_ref().map(|r| r.to_string()),
-                    });
-                }
-            }
-        }
-    }
-    deps
+fn compatible_remotes(entries: Vec<crate::manifest::RemoteEntry>) -> Result<Vec<GitlabRemote>> {
+    crate::manifest::compatible_remote_entries(entries)
 }
 
 #[cfg(test)]
@@ -370,6 +456,12 @@ mod tests {
 
         let parsed = parse_gitlab_parts("gitlab::gitlab.com/group/subgroup/mypkg@main").unwrap();
         assert_eq!(parsed.project_name(), "mypkg");
+    }
+
+    #[test]
+    fn parse_spec_rejects_gitlab_package_directory_form() {
+        assert!(parse_gitlab_parts("gitlab::host/group/repo/-/subdir").is_none());
+        assert!(parse_gitlab_parts("host/group/repo/-/nested/subdir@main").is_none());
     }
 
     #[test]
@@ -427,6 +519,67 @@ mod tests {
 
         let p = parse_gitlab_parts("gitlab::gitlab.com/my-group/mypkg@v1.0").unwrap();
         assert_eq!(p.git_ref.as_deref(), Some("v1.0"));
+        assert!(parse_gitlab_parts("gitlab::gitlab.com/my-group/mypkg@").is_none());
+    }
+
+    #[test]
+    fn bound_package_name_requires_present_legal_description_field() {
+        let missing = crate::dcf::parse_dcf_fields("Version: 1.0.0\n");
+        let error = description_package_name(
+            &missing,
+            "gitlab.example",
+            "group/repo",
+            "repo",
+            "commit",
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("has no `Package:` field"), "{error}");
+
+        let invalid = crate::dcf::parse_dcf_fields("Package: bad name\nVersion: 1.0.0\n");
+        let error = description_package_name(
+            &invalid,
+            "gitlab.example",
+            "group/repo",
+            "repo",
+            "commit",
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("invalid `Package:` name"), "{error}");
+
+        let valid = crate::dcf::parse_dcf_fields("Package: Alias\nVersion: 1.0.0\n");
+        assert_eq!(
+            description_package_name(
+                &valid,
+                "gitlab.example",
+                "group/repo",
+                "repo",
+                "commit",
+                true,
+            )
+            .unwrap(),
+            "Alias"
+        );
+    }
+
+    #[test]
+    fn unbound_package_name_keeps_project_fallback() {
+        let missing = crate::dcf::parse_dcf_fields("Version: 1.0.0\n");
+        assert_eq!(
+            description_package_name(
+                &missing,
+                "gitlab.example",
+                "group/repo",
+                "repo",
+                "commit",
+                false,
+            )
+            .unwrap(),
+            "repo"
+        );
     }
 
     #[test]
@@ -512,7 +665,7 @@ Remotes: gitlab::gitlab.com/my-group/mypkg@v0.1.0,
     forgejo::codefloe.com/pat-s/skipme
 ";
         let fields = crate::dcf::parse_dcf_fields(desc);
-        let remotes = parse_gitlab_remotes(&fields);
+        let remotes = parse_gitlab_remotes(&fields).unwrap();
         let pairs: Vec<(&str, &str)> = remotes
             .iter()
             .map(|(n, g, _)| (n.as_str(), g.as_str()))

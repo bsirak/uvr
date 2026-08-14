@@ -405,6 +405,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
                 LockedPackage {
                     name: "DESeq2".to_string(),
@@ -416,6 +417,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
             ],
         };
@@ -457,6 +459,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
                 LockedPackage {
                     name: "DESeq2".to_string(),
@@ -468,6 +471,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
             ],
         };
@@ -524,6 +528,7 @@ mod tests {
                 url: None,
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -555,6 +560,7 @@ mod tests {
                 url: Some("https://api.github.com/repos/user/mypkg/tarball/main".to_string()),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -582,6 +588,7 @@ mod tests {
             raw_version: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let (source, repository) = export_source_and_repository(&pkg.source);
         assert_eq!(source, "Git");
@@ -612,6 +619,7 @@ mod tests {
                 ),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -657,6 +665,7 @@ mod tests {
             raw_version: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let (source, repository) = export_source_and_repository(&pkg.source);
         assert_eq!(source, "Git");
@@ -687,6 +696,7 @@ mod tests {
                 ),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -742,6 +752,7 @@ mod tests {
                 url: None,
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 

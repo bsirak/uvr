@@ -42,6 +42,9 @@ pub struct LockedPackage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdirectory: Option<String>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
 
@@ -407,6 +410,45 @@ source = "gitlab:git.local:3000"
         assert!(s.contains(r#"source = "gitlab:git.local:3000""#));
         let lf2: Lockfile = s.parse().unwrap();
         assert_eq!(lf, lf2);
+    }
+
+    #[test]
+    fn round_trip_github_subdirectory() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let input = format!(
+            r#"
+[r]
+version = "4.4.2"
+
+[[package]]
+name = "nested"
+version = "0.1.0"
+source = "github"
+url = "https://api.github.com/repos/owner/repo/tarball/{sha}"
+checksum = "git:{sha}"
+subdirectory = "pkgs/nested"
+"#
+        );
+        let lf: Lockfile = input.parse().expect("parse github subdirectory");
+        let pkg = lf.get_package("nested").unwrap();
+        assert_eq!(pkg.subdirectory.as_deref(), Some("pkgs/nested"));
+        assert_eq!(pkg.checksum.as_deref(), Some(format!("git:{sha}").as_str()));
+        assert_eq!(
+            pkg.url.as_deref(),
+            Some(format!("https://api.github.com/repos/owner/repo/tarball/{sha}").as_str())
+        );
+
+        let s = lf.to_toml_string().unwrap();
+        assert!(s.contains(r#"subdirectory = "pkgs/nested""#));
+        let lf2: Lockfile = s.parse().unwrap();
+        assert_eq!(lf, lf2);
+    }
+
+    #[test]
+    fn backward_compat_no_subdirectory() {
+        let lf: Lockfile = SAMPLE.parse().expect("parse");
+        assert!(lf.get_package("ggplot2").unwrap().subdirectory.is_none());
+        assert!(!lf.to_toml_string().unwrap().contains("subdirectory"));
     }
 
     #[test]

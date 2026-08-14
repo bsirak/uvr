@@ -2094,6 +2094,7 @@ mod tests {
                 url: Some("https://cran.r-project.org/test".into()),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
         assert!(lockfiles_equivalent(&lf, &lf));
@@ -2116,6 +2117,7 @@ mod tests {
                 url: Some("https://example.com/old".into()),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
         let lf2 = Lockfile {
@@ -2133,6 +2135,7 @@ mod tests {
                 url: Some("https://example.com/new".into()),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
         assert!(lockfiles_equivalent(&lf1, &lf2));
@@ -2155,6 +2158,7 @@ mod tests {
                 url: None,
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
         assert!(!lockfiles_equivalent(&make("1.8.7"), &make("1.8.8")));
@@ -2202,6 +2206,7 @@ mod tests {
                 url: None,
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
         assert!(!lockfiles_equivalent(
@@ -2222,6 +2227,7 @@ mod tests {
             url: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let url = source_url(&pkg, None);
         assert_eq!(
@@ -2242,6 +2248,7 @@ mod tests {
             url: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let url = source_url(&pkg, None);
         assert!(url.contains("scales_1.1-3.tar.gz"));
@@ -2259,6 +2266,7 @@ mod tests {
             url: Some("https://custom-mirror.org/jsonlite.tar.gz".into()),
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let url = source_url(&pkg, None);
         assert_eq!(url, "https://custom-mirror.org/jsonlite.tar.gz");
@@ -2276,6 +2284,7 @@ mod tests {
             url: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let url = source_url(&pkg, Some("3.20"));
         assert!(url.contains("bioconductor.org"));
@@ -2295,6 +2304,7 @@ mod tests {
             url: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         assert!(source_url(&pkg, None).is_empty());
     }
@@ -2312,6 +2322,7 @@ mod tests {
             url: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
 
         // Not installed
@@ -2348,6 +2359,7 @@ mod tests {
             url: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         std::fs::create_dir_all(dir.path().join("scales")).unwrap();
         std::fs::write(
@@ -2368,6 +2380,7 @@ mod tests {
             url: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         assert!(is_installed(&dash_pkg_no_raw, dir.path()));
     }
@@ -2470,6 +2483,7 @@ mod tests {
             url: Some(url.into()),
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         }
     }
 

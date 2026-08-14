@@ -3,11 +3,10 @@ use tracing::debug;
 
 use crate::error::{Result, UvrError};
 use crate::lockfile::PackageSource;
-use crate::manifest::DependencySpec;
-use crate::registry::{Dep, PackageInfo};
+use crate::registry::PackageInfo;
 
-/// A forgejo-sourced dependency declared in another package's `Remotes:`
-/// field. `(dep_name, "forgejo::host/owner/repo", optional_ref)`.
+/// Legacy tuple form for a Forgejo-sourced `Remotes:` dependency:
+/// `(dep_name, "forgejo::host/owner/repo", optional_ref)`.
 pub type ForgejoRemote = (String, String, Option<String>);
 
 /// A validated Forgejo spec. `git_ref` is `None` when the spec carried no
@@ -44,17 +43,10 @@ pub fn parse_forgejo_parts(spec: &str) -> Option<ForgejoSpec> {
     let (path_part, git_ref) = match body.rfind('@') {
         Some(at) => {
             let r = &body[at + 1..];
-            let git_ref = if r.is_empty() {
-                None
-            } else {
-                // Refs with `&`, `#`, `?`, whitespace, etc. would mis-parse
-                // the registry API request — reject at parse time (#152).
-                if !crate::registry::github::is_valid_git_ref(r) {
-                    return None;
-                }
-                Some(r.to_string())
-            };
-            (&body[..at], git_ref)
+            if !crate::registry::github::is_valid_git_ref(r) {
+                return None;
+            }
+            (&body[..at], Some(r.to_string()))
         }
         None => (body, None),
     };
@@ -137,8 +129,8 @@ pub fn forgejo_token(host: &str) -> Option<String> {
     None
 }
 
-/// Resolve a Forgejo-hosted R package: fetch commit SHA, fetch DESCRIPTION,
-/// build a tarball URL for the lockfile.
+/// Resolve a Forgejo-hosted R package while deliberately discarding rich
+/// `Remotes:` entries before the fallible legacy-tuple adapter.
 pub async fn resolve_forgejo_package(
     client: &reqwest::Client,
     host: &str,
@@ -146,13 +138,13 @@ pub async fn resolve_forgejo_package(
     repo: &str,
     git_ref: &str,
 ) -> Result<PackageInfo> {
-    resolve_forgejo_package_with_remotes(client, host, owner, repo, git_ref)
+    resolve_forgejo_package_with_remote_entries(client, host, owner, repo, git_ref)
         .await
         .map(|(info, _)| info)
 }
 
-/// Resolve a Forgejo package and return its `Remotes:`-declared forgejo deps,
-/// so callers can walk transitive forgejo→forgejo chains during `uvr lock`.
+/// Legacy tuple adapter for a Forgejo package's `Remotes:` entries. Nested or
+/// bound-unsupported entries return an error rather than losing identity.
 pub async fn resolve_forgejo_package_with_remotes(
     client: &reqwest::Client,
     host: &str,
@@ -160,8 +152,79 @@ pub async fn resolve_forgejo_package_with_remotes(
     repo: &str,
     git_ref: &str,
 ) -> Result<(PackageInfo, Vec<ForgejoRemote>)> {
-    let commit_sha = fetch_commit_sha(client, host, owner, repo, git_ref).await?;
+    let (info, remotes) =
+        resolve_forgejo_package_with_remote_entries(client, host, owner, repo, git_ref).await?;
+    Ok((info, compatible_remotes(remotes)?))
+}
 
+pub async fn resolve_forgejo_package_with_remote_entries(
+    client: &reqwest::Client,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+) -> Result<(PackageInfo, Vec<crate::manifest::RemoteEntry>)> {
+    resolve_forgejo_package_with_remote_entries_bound(client, host, owner, repo, git_ref, false)
+        .await
+}
+
+pub async fn resolve_forgejo_package_with_remote_entries_bound(
+    client: &reqwest::Client,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    require_declared_name: bool,
+) -> Result<(PackageInfo, Vec<crate::manifest::RemoteEntry>)> {
+    let commit_sha = fetch_commit_sha(client, host, owner, repo, git_ref).await?;
+    resolve_forgejo_package_with_remote_entries_at_commit_bound(
+        client,
+        host,
+        owner,
+        repo,
+        &commit_sha,
+        require_declared_name,
+    )
+    .await
+}
+
+pub async fn resolve_forgejo_package_with_remote_entries_at_commit_bound(
+    client: &reqwest::Client,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    commit_sha: &str,
+    require_declared_name: bool,
+) -> Result<(PackageInfo, Vec<crate::manifest::RemoteEntry>)> {
+    let (info, remotes, _) =
+        resolve_forgejo_package_with_remote_entries_and_install_dependencies_at_commit_bound(
+            client,
+            host,
+            owner,
+            repo,
+            commit_sha,
+            require_declared_name,
+        )
+        .await?;
+    Ok((info, remotes))
+}
+
+/// Resolve a Forgejo package while also returning every install-time
+/// DESCRIPTION dependency name used to bind nested GitHub `Remotes:` entries.
+/// `PackageInfo::requires` deliberately retains Forgejo's existing
+/// Imports/Depends-only behavior.
+pub async fn resolve_forgejo_package_with_remote_entries_and_install_dependencies_at_commit_bound(
+    client: &reqwest::Client,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    commit_sha: &str,
+    require_declared_name: bool,
+) -> Result<(
+    PackageInfo,
+    Vec<crate::manifest::RemoteEntry>,
+    std::collections::BTreeSet<String>,
+)> {
     let desc_url =
         format!("https://{host}/api/v1/repos/{owner}/{repo}/raw/DESCRIPTION?ref={commit_sha}");
     let mut desc_req = client
@@ -177,16 +240,20 @@ pub async fn resolve_forgejo_package_with_remotes(
             host,
             owner,
             repo,
-            &commit_sha,
+            commit_sha,
         ));
     }
     let desc_text = desc_resp.text().await?;
 
     let desc_fields = crate::dcf::parse_dcf_fields(&desc_text);
-    let pkg_name = desc_fields
-        .get("Package")
-        .cloned()
-        .unwrap_or_else(|| repo.to_string());
+    let pkg_name = description_package_name(
+        &desc_fields,
+        host,
+        owner,
+        repo,
+        commit_sha,
+        require_declared_name,
+    )?;
     let pkg_version = desc_fields
         .get("Version")
         .cloned()
@@ -194,12 +261,14 @@ pub async fn resolve_forgejo_package_with_remotes(
     let version = Version::parse(&crate::resolver::normalize_version(&pkg_version))
         .unwrap_or_else(|_| Version::new(0, 0, 0));
 
-    let requires = parse_description_deps(&desc_fields);
-    let remotes = parse_forgejo_remotes(&desc_fields);
+    let requires = crate::registry::github::parse_description_runtime_deps(&desc_fields);
+    let install_dependencies =
+        crate::registry::github::parse_description_install_dependency_names(&desc_fields);
+    let remotes = parse_forgejo_remote_entries(&desc_fields);
 
     let url = format!("https://{host}/api/v1/repos/{owner}/{repo}/archive/{commit_sha}.tar.gz");
 
-    debug!("Forgejo {host}/{owner}/{repo}@{git_ref} → {pkg_name} {version} ({commit_sha})");
+    debug!("Forgejo {host}/{owner}/{repo}@{commit_sha} → {pkg_name} {version}");
 
     Ok((
         PackageInfo {
@@ -213,12 +282,47 @@ pub async fn resolve_forgejo_package_with_remotes(
             url,
             raw_version: None,
             system_requirements: None,
+            subdirectory: None,
         },
         remotes,
+        install_dependencies,
     ))
 }
 
-async fn fetch_commit_sha(
+fn description_package_name(
+    fields: &std::collections::BTreeMap<String, String>,
+    host: &str,
+    owner: &str,
+    repo: &str,
+    commit_sha: &str,
+    require_declared_name: bool,
+) -> Result<String> {
+    if !require_declared_name {
+        return Ok(fields
+            .get("Package")
+            .cloned()
+            .unwrap_or_else(|| repo.to_string()));
+    }
+    let name = fields
+        .get("Package")
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            UvrError::Other(format!(
+                "DESCRIPTION for Forgejo {host}/{owner}/{repo}@{commit_sha} has no `Package:` \
+                 field; cannot validate the bound package identity."
+            ))
+        })?;
+    if !crate::package_name::is_valid(&name) {
+        return Err(UvrError::Other(format!(
+            "DESCRIPTION for Forgejo {host}/{owner}/{repo}@{commit_sha} declares an invalid \
+             `Package:` name '{name}'."
+        )));
+    }
+    Ok(name)
+}
+
+pub async fn fetch_commit_sha(
     client: &reqwest::Client,
     host: &str,
     owner: &str,
@@ -290,43 +394,24 @@ fn map_forgejo_error(
     }
 }
 
+#[cfg(test)]
 fn parse_forgejo_remotes(
     desc_fields: &std::collections::BTreeMap<String, String>,
-) -> Vec<ForgejoRemote> {
-    // Return ALL git-bearing entries — both `git = "user/repo"` (github)
-    // and `git = "forgejo::host/owner/repo"` (forgejo). The lock-time BFS
-    // dispatches by prefix via `classify_git`, so a forgejo package whose
-    // DESCRIPTION declares `Remotes: github::user/repo` walks correctly
-    // into the github registry. Mirrors `github::parse_github_remotes`.
+) -> Result<Vec<ForgejoRemote>> {
+    compatible_remotes(parse_forgejo_remote_entries(desc_fields))
+}
+
+fn parse_forgejo_remote_entries(
+    desc_fields: &std::collections::BTreeMap<String, String>,
+) -> Vec<crate::manifest::RemoteEntry> {
     let Some(remotes_field) = desc_fields.get("Remotes") else {
         return Vec::new();
     };
-    crate::manifest::parse_remotes_field(remotes_field)
-        .into_iter()
-        .filter_map(|(name, spec)| match spec {
-            DependencySpec::Detailed(d) => d.git.map(|repo| (name, repo, d.rev)),
-            DependencySpec::Version(_) => None,
-        })
-        .collect()
+    crate::manifest::parse_remotes_field_rich(remotes_field)
 }
 
-/// Same shape as `github::parse_description_deps` — small enough that
-/// reusing it via a shared helper isn't worth the cross-module coupling.
-fn parse_description_deps(fields: &std::collections::BTreeMap<String, String>) -> Vec<Dep> {
-    let mut deps = Vec::new();
-    for field in &["Imports", "Depends"] {
-        if let Some(value) = fields.get(*field) {
-            for d in crate::registry::cran::parse_dep_field(value) {
-                if !crate::resolver::is_base_package(&d.name) {
-                    deps.push(Dep {
-                        name: d.name,
-                        constraint: d.req.as_ref().map(|r| r.to_string()),
-                    });
-                }
-            }
-        }
-    }
-    deps
+fn compatible_remotes(entries: Vec<crate::manifest::RemoteEntry>) -> Result<Vec<ForgejoRemote>> {
+    crate::manifest::compatible_remote_entries(entries)
 }
 
 #[cfg(test)]
@@ -398,6 +483,64 @@ mod tests {
 
         let p = parse_forgejo_parts("forgejo::codefloe.com/pat-s/mypkg@v1.0").unwrap();
         assert_eq!(p.git_ref.as_deref(), Some("v1.0"));
+        assert!(parse_forgejo_parts("forgejo::codefloe.com/pat-s/mypkg@").is_none());
+    }
+
+    #[test]
+    fn install_dependency_names_include_linking_to_without_changing_requires() {
+        let fields = crate::dcf::parse_dcf_fields(
+            "Package: parent\nImports: imported\nDepends: depended\nLinkingTo: headers\n",
+        );
+        let requires: Vec<String> =
+            crate::registry::github::parse_description_runtime_deps(&fields)
+                .into_iter()
+                .map(|dependency| dependency.name)
+                .collect();
+        let install_dependencies =
+            crate::registry::github::parse_description_install_dependency_names(&fields);
+
+        assert_eq!(requires, ["imported", "depended"]);
+        assert_eq!(
+            install_dependencies,
+            ["depended", "headers", "imported"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn bound_package_name_requires_present_legal_description_field() {
+        let missing = crate::dcf::parse_dcf_fields("Version: 1.0.0\n");
+        let error =
+            description_package_name(&missing, "code.example", "team", "repo", "commit", true)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("has no `Package:` field"), "{error}");
+
+        let invalid = crate::dcf::parse_dcf_fields("Package: bad name\nVersion: 1.0.0\n");
+        let error =
+            description_package_name(&invalid, "code.example", "team", "repo", "commit", true)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("invalid `Package:` name"), "{error}");
+
+        let valid = crate::dcf::parse_dcf_fields("Package: Alias\nVersion: 1.0.0\n");
+        assert_eq!(
+            description_package_name(&valid, "code.example", "team", "repo", "commit", true,)
+                .unwrap(),
+            "Alias"
+        );
+    }
+
+    #[test]
+    fn unbound_package_name_keeps_repository_fallback() {
+        let missing = crate::dcf::parse_dcf_fields("Version: 1.0.0\n");
+        assert_eq!(
+            description_package_name(&missing, "code.example", "team", "repo", "commit", false,)
+                .unwrap(),
+            "repo"
+        );
     }
 
     #[test]
@@ -486,12 +629,12 @@ Remotes: forgejo::codefloe.com/pat-s/mypkg@v0.1.0,
     gitlab::someone/skipme
 ";
         let fields = crate::dcf::parse_dcf_fields(desc);
-        let remotes = parse_forgejo_remotes(&fields);
+        let remotes = parse_forgejo_remotes(&fields).unwrap();
         let pairs: Vec<(&str, &str)> = remotes
             .iter()
             .map(|(n, g, _)| (n.as_str(), g.as_str()))
             .collect();
-        // gitlab:: is dropped by parse_remotes_field; forgejo and github survive.
+        // The malformed unbound GitLab hint is skipped by the legacy adapter.
         assert_eq!(
             pairs,
             vec![

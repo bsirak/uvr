@@ -24,6 +24,7 @@ pub struct ResolvedPackage {
     pub url: String,
     pub raw_version: Option<String>,
     pub system_requirements: Option<String>,
+    pub subdirectory: Option<String>,
 }
 
 /// Trait to abstract over CRAN / Bioconductor / GitHub registries.
@@ -183,6 +184,7 @@ impl<'a> Resolver<'a> {
                                             raw_version: new_info.raw_version,
                                             url: new_info.url,
                                             system_requirements: new_info.system_requirements,
+                                            subdirectory: new_info.subdirectory,
                                         },
                                     );
                                     // Rebuild graph edges for the re-resolved package.
@@ -284,6 +286,7 @@ impl<'a> Resolver<'a> {
                     url: info.url,
                     raw_version: info.raw_version,
                     system_requirements: info.system_requirements,
+                    subdirectory: info.subdirectory,
                 },
             );
         }
@@ -315,6 +318,7 @@ impl<'a> Resolver<'a> {
                     // than round-tripping `""` into the lockfile.
                     url: (!r.url.is_empty()).then_some(r.url),
                     checksum: r.checksum,
+                    subdirectory: r.subdirectory,
                     requires: r.requires,
                     system_requirements: r.system_requirements,
                     dev: is_dev,
@@ -345,6 +349,7 @@ impl<'a> Resolver<'a> {
 /// for pins: their deps are themselves pinned or resolve fresh with real
 /// registry constraints.
 pub fn locked_to_package_info(p: &LockedPackage) -> Result<PackageInfo> {
+    crate::registry::github::validate_nested_lock_entry(p)?;
     let version = Version::parse(&normalize_version(&p.version)).map_err(|e| {
         UvrError::Other(format!(
             "Locked version {} of {} is not parseable: {e}",
@@ -367,6 +372,7 @@ pub fn locked_to_package_info(p: &LockedPackage) -> Result<PackageInfo> {
         url: p.url.clone().unwrap_or_default(),
         raw_version: p.raw_version.clone(),
         system_requirements: p.system_requirements.clone(),
+        subdirectory: p.subdirectory.clone(),
     })
 }
 
@@ -688,6 +694,7 @@ mod tests {
                 url: format!("https://cran.r-project.org/{name}_{version}.tar.gz"),
                 raw_version: None,
                 system_requirements: None,
+                subdirectory: None,
             },
         )
     }
@@ -831,6 +838,7 @@ mod tests {
             requires: vec![],
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let pins = HashMap::from([(
             "rlang".to_string(),
@@ -842,6 +850,83 @@ mod tests {
             result,
             Err(UvrError::VersionConflict { ref package, .. }) if package == "rlang"
         ));
+    }
+
+    const NESTED_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn nested_locked_package() -> LockedPackage {
+        LockedPackage {
+            name: "nested".into(),
+            version: "0.1.0".into(),
+            source: PackageSource::GitHub,
+            raw_version: None,
+            url: Some(format!(
+                "https://api.github.com/repos/owner/repo/tarball/{NESTED_SHA}"
+            )),
+            checksum: Some(format!("git:{NESTED_SHA}")),
+            requires: vec![],
+            system_requirements: None,
+            dev: false,
+            subdirectory: Some("pkgs/nested".into()),
+        }
+    }
+
+    #[test]
+    fn pre_resolved_subdirectory_reaches_the_lockfile() {
+        let registry = MockRegistry {
+            packages: HashMap::new(),
+        };
+        let resolver = Resolver::new(&registry);
+        let mut manifest = Manifest::new("test", None);
+        manifest.add_dep(
+            "nested".into(),
+            DependencySpec::Detailed(crate::manifest::DetailedDep {
+                git: Some("owner/repo".into()),
+                subdirectory: Some("pkgs/nested".into()),
+                ..Default::default()
+            }),
+            false,
+        );
+        let pre_resolved = HashMap::from([(
+            "nested".to_string(),
+            locked_to_package_info(&nested_locked_package()).unwrap(),
+        )]);
+
+        let lockfile = resolver
+            .resolve(&manifest, None, None, pre_resolved)
+            .unwrap();
+        let pkg = lockfile.get_package("nested").unwrap();
+        assert_eq!(pkg.subdirectory.as_deref(), Some("pkgs/nested"));
+        assert_eq!(pkg.source, PackageSource::GitHub);
+        assert_eq!(
+            pkg.checksum.as_deref(),
+            Some(format!("git:{NESTED_SHA}").as_str())
+        );
+        assert_eq!(
+            pkg.url.as_deref(),
+            Some(format!("https://api.github.com/repos/owner/repo/tarball/{NESTED_SHA}").as_str())
+        );
+    }
+
+    #[test]
+    fn locked_to_package_info_carries_subdirectory() {
+        let info = locked_to_package_info(&nested_locked_package()).unwrap();
+        assert_eq!(info.subdirectory.as_deref(), Some("pkgs/nested"));
+    }
+
+    #[test]
+    fn locked_to_package_info_rejects_inconsistent_nested_entry() {
+        let mut bad_url = nested_locked_package();
+        bad_url.url = Some("https://example.com/nested.tar.gz".into());
+        assert!(locked_to_package_info(&bad_url).is_err());
+
+        let mut bad_path = nested_locked_package();
+        bad_path.subdirectory = Some("../escape".into());
+        assert!(locked_to_package_info(&bad_path).is_err());
+
+        let mut short_sha = nested_locked_package();
+        short_sha.checksum = Some(format!("git:{}", &NESTED_SHA[..7]));
+        assert!(locked_to_package_info(&short_sha).is_err());
     }
 
     #[test]
@@ -875,6 +960,7 @@ mod tests {
             requires: vec![],
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let pins = HashMap::from([(
             "rlang".to_string(),
@@ -916,6 +1002,7 @@ mod tests {
             requires: vec![],
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let pins = HashMap::from([(
             "rlang".to_string(),
@@ -964,6 +1051,7 @@ mod tests {
                 url: "https://api.github.com/...".to_string(),
                 raw_version: None,
                 system_requirements: None,
+                subdirectory: None,
             },
         );
 
@@ -1014,6 +1102,7 @@ mod tests {
                 url: "https://api.github.com/...".to_string(),
                 raw_version: None,
                 system_requirements: None,
+                subdirectory: None,
             },
         );
 
@@ -1046,6 +1135,7 @@ mod tests {
                         url: "https://example.com/pkgA.tar.gz".into(),
                         raw_version: None,
                         system_requirements: None,
+                        subdirectory: None,
                     }),
                     "pkgB" => Ok(PackageInfo {
                         name: "pkgB".into(),
@@ -1059,6 +1149,7 @@ mod tests {
                         url: "https://example.com/pkgB.tar.gz".into(),
                         raw_version: None,
                         system_requirements: None,
+                        subdirectory: None,
                     }),
                     "shared" => {
                         // Return the best version that satisfies the constraint
@@ -1079,6 +1170,7 @@ mod tests {
                                             url: format!("https://example.com/shared_{ver}.tar.gz"),
                                             raw_version: None,
                                             system_requirements: None,
+                                            subdirectory: None,
                                         });
                                     }
                                 }
@@ -1094,6 +1186,7 @@ mod tests {
                             url: "https://example.com/shared_1.5.0.tar.gz".into(),
                             raw_version: None,
                             system_requirements: None,
+                            subdirectory: None,
                         })
                     }
                     _ => Err(UvrError::PackageNotFound(name.to_string())),
@@ -1133,6 +1226,7 @@ mod tests {
                 requires: vec!["dplyr".into(), "rlang".into()],
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             },
             LockedPackage {
                 name: "dplyr".into(),
@@ -1144,6 +1238,7 @@ mod tests {
                 requires: vec!["rlang".into()],
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             },
             LockedPackage {
                 name: "rlang".into(),
@@ -1155,6 +1250,7 @@ mod tests {
                 requires: vec![],
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             },
         ];
 

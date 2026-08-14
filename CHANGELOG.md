@@ -7,6 +7,15 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **R packages in a GitHub repository subdirectory can be declared and
+  locked** (#244). `uvr add 'owner/repo[@revision]#subdirectory=path'` — and
+  the equivalent `subdirectory = "path"` written by hand next to `git` in
+  `uvr.toml` — resolves the ref to an exact commit once, reads the
+  DESCRIPTION at that commit inside the subdirectory, and locks the package
+  under its real `Package:` name with the canonical repository tarball,
+  `checksum = "git:<commit>"`, and the subdirectory. Installing from such a
+  lock entry is not part of this change.
+
 ## v0.4.6 (2026-08-10)
 
 Standalone scripts land: a `.R` file can now declare its own dependencies

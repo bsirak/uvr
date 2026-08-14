@@ -85,6 +85,13 @@ impl DependencySpec {
             _ => None,
         }
     }
+
+    pub fn subdirectory(&self) -> Option<&str> {
+        match self {
+            DependencySpec::Detailed(d) => d.subdirectory.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 impl Default for DependencySpec {
@@ -106,15 +113,28 @@ pub struct DetailedDep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git: Option<String>,
 
+    /// Require the fetched DESCRIPTION `Package:` to equal the manifest key.
+    /// This preserves an explicit `Remotes:` alias even when it has the same
+    /// spelling as the repository basename.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exact: bool,
+
     /// branch / tag / commit SHA
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subdirectory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PackageSource {
     pub name: String,
     pub url: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl std::str::FromStr for Manifest {
@@ -127,7 +147,7 @@ impl std::str::FromStr for Manifest {
 
         // Validate [dependencies] and [dev-dependencies]: every value must be
         // a string (bare version) or a table whose keys are known DetailedDep
-        // fields {version, bioc, git, rev}. A TOML table-header entry like
+        // fields {version, bioc, git, exact, rev, subdirectory}. A TOML table-header entry like
         // `[dependencies.data.table]` creates a nested table under key `data`
         // with a sub-key `table` — not a valid DetailedDep field. This check
         // catches that case before serde silently resolves the wrong package.
@@ -135,7 +155,7 @@ impl std::str::FromStr for Manifest {
         // NOTE: `VALID_DEP_KEYS` must list every field of `DetailedDep`. A
         // field added to that struct without updating this slice will cause
         // valid manifests to be rejected — keep them in sync.
-        const VALID_DEP_KEYS: &[&str] = &["version", "bioc", "git", "rev"];
+        const VALID_DEP_KEYS: &[&str] = &["version", "bioc", "git", "exact", "rev", "subdirectory"];
 
         for section in &["dependencies", "dev-dependencies"] {
             if let Some(toml::Value::Table(deps)) = raw.get(*section) {
@@ -198,12 +218,16 @@ impl std::str::FromStr for Manifest {
                                  Or run: uvr add {full_name}"
                             )));
                         }
+                        validate_subdirectory_entry(key, section, inner)?;
                     }
                 }
             }
         }
 
-        toml::from_str(s).map_err(|e| crate::error::UvrError::ManifestParse(e.to_string()))
+        let manifest: Manifest =
+            toml::from_str(s).map_err(|e| crate::error::UvrError::ManifestParse(e.to_string()))?;
+        manifest.validate_detailed_dependencies()?;
+        Ok(manifest)
     }
 }
 
@@ -234,8 +258,8 @@ impl Manifest {
     /// - `Suggests:` → `dev_dependencies`
     /// - `Depends: R (>= x.y.z)` → `project.r_version`
     /// - Non-R entries in `Depends:` are merged into `dependencies`
-    /// - `Remotes:` entries override matching `Imports:` / `Depends:` entries
-    ///   with git-source specs (github only for now).
+    /// - `Remotes:` entries override matching `Imports:` / `Depends:` /
+    ///   `Suggests:` entries with supported git-source specs.
     pub fn from_description_str(content: &str) -> Result<Self> {
         let fields = parse_dcf(content);
 
@@ -270,31 +294,61 @@ impl Manifest {
             }
         }
 
-        // Remotes override matching Imports/Depends/Suggests entries — they
-        // declare the *source* for a dep already listed by name above. The
-        // package name is derived from the repo URL by default, but R's
-        // companion-package idiom often names the repo `<pkg>-r` while the
-        // Imports/Suggests line uses `<pkg>` (#68). When the URL-derived
-        // name doesn't match an existing dep, we strip common `-r` / `_r` /
-        // `.r` suffixes before giving up.
         if let Some(remotes) = fields.get("Remotes") {
-            for (url_pkg, spec) in parse_remotes_field(remotes) {
-                let resolved = resolve_remote_pkg_name(&url_pkg, &dependencies, &dev_dependencies);
+            for entry in parse_remotes_field_rich(remotes) {
+                let source = match entry {
+                    RemoteEntry::Source(source) => source,
+                    RemoteEntry::Unsupported {
+                        entry,
+                        reason,
+                        bound: true,
+                    } => {
+                        return Err(UvrError::ManifestParse(format!(
+                            "unsupported bound Remotes entry '{entry}': {reason}. Correct or remove \
+                             the alias; nested GitHub remotes must use `PackageName=owner/repo:path`."
+                        )));
+                    }
+                    RemoteEntry::Unsupported {
+                        entry,
+                        reason,
+                        bound: false,
+                    } => {
+                        tracing::warn!(
+                            "Ignoring unbound Remotes entry '{entry}' while importing DESCRIPTION: \
+                             {reason}"
+                        );
+                        continue;
+                    }
+                };
+
+                let resolved = if source.explicit_name {
+                    source.name.clone()
+                } else if let Some(name) =
+                    match_remote_pkg_name(&source.name, &dependencies, &dev_dependencies)
+                {
+                    name
+                } else if source.subdirectory.is_some() {
+                    return Err(UvrError::ManifestParse(format!(
+                        "unaliased nested Remotes entry for '{}' cannot be matched to an \
+                         Imports, Depends, or Suggests package. Add an explicit binding such as \
+                         `PackageName={}`.",
+                        source.repository,
+                        remote_source_target(&source)
+                    )));
+                } else {
+                    source.name.clone()
+                };
                 let target = if dev_dependencies.contains_key(&resolved) {
                     &mut dev_dependencies
                 } else {
                     &mut dependencies
                 };
-                // A Remotes entry declares the *source*, not the version —
-                // carry any constraint from the Imports/Depends/Suggests
-                // line into the git spec so the resolver's pre-resolved
-                // check still has something to validate against (#132).
                 let existing_version = target
                     .get(&resolved)
                     .and_then(|s| s.version_req())
                     .filter(|v| *v != "*")
                     .map(str::to_string);
-                let spec = match spec {
+                let spec = match source.dependency_spec() {
                     DependencySpec::Detailed(d)
                         if d.version.is_none() && existing_version.is_some() =>
                     {
@@ -329,6 +383,7 @@ impl Manifest {
     }
 
     pub fn to_toml_string(&self) -> Result<String> {
+        self.validate_detailed_dependencies()?;
         toml::to_string_pretty(self).map_err(UvrError::TomlSer)
     }
 
@@ -353,6 +408,90 @@ impl Manifest {
         let a = self.dependencies.remove(name).is_some();
         let b = self.dev_dependencies.remove(name).is_some();
         a || b
+    }
+
+    fn validate_detailed_dependencies(&self) -> Result<()> {
+        for (section, dependencies) in [
+            ("dependencies", &self.dependencies),
+            ("dev-dependencies", &self.dev_dependencies),
+        ] {
+            for (name, spec) in dependencies {
+                let DependencySpec::Detailed(dep) = spec else {
+                    continue;
+                };
+                validate_detailed_dependency(name, section, dep)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_detailed_dependency(name: &str, section: &str, dep: &DetailedDep) -> Result<()> {
+    if dep.exact {
+        let git = dep
+            .git
+            .as_deref()
+            .map(str::trim)
+            .filter(|git| !git.is_empty())
+            .ok_or_else(|| {
+                UvrError::ManifestParse(format!(
+                    "dependency `{name}` in [{section}]: `exact = true` requires a `git` source."
+                ))
+            })?;
+        let spec = match dep.rev.as_deref() {
+            Some(rev) => format!("{git}@{rev}"),
+            None => git.to_string(),
+        };
+        let valid = if git.starts_with("forgejo::") {
+            crate::registry::forgejo::parse_forgejo_parts(&spec).is_some()
+        } else if git.starts_with("gitlab::") {
+            crate::registry::gitlab::parse_gitlab_parts(&spec).is_some()
+        } else {
+            crate::registry::github::is_valid_github_repo_spec(&spec)
+        };
+        if !valid {
+            return Err(UvrError::ManifestParse(format!(
+                "dependency `{name}` in [{section}]: `exact = true` requires a valid supported \
+                 git source and revision, got `{spec}`."
+            )));
+        }
+    }
+
+    let Some(path) = dep.subdirectory.as_deref() else {
+        return Ok(());
+    };
+    let git = dep.git.as_deref().ok_or_else(|| {
+        UvrError::ManifestParse(format!(
+            "dependency `{name}` in [{section}]: `subdirectory` requires a `git` source."
+        ))
+    })?;
+    if git.starts_with("forgejo::") || git.starts_with("gitlab::") {
+        return Err(UvrError::ManifestParse(format!(
+            "dependency `{name}` in [{section}]: `subdirectory` is only supported for \
+             GitHub sources (`git = \"owner/repo\"`), not `{git}`."
+        )));
+    }
+    let spec = match dep.rev.as_deref() {
+        Some(rev) => format!("{git}@{rev}"),
+        None => git.to_string(),
+    };
+    if !crate::registry::github::is_valid_github_repo_spec(&spec) {
+        return Err(UvrError::ManifestParse(format!(
+            "dependency `{name}` in [{section}]: `{spec}` is not a valid GitHub source for a \
+             `subdirectory` package. Expected `git = \"owner/repo\"` with an optional \
+             `rev = \"revision\"`."
+        )));
+    }
+    crate::subdirectory::validate(path)
+        .map_err(|e| UvrError::ManifestParse(format!("dependency `{name}` in [{section}]: {e}")))
+}
+
+fn validate_subdirectory_entry(key: &str, section: &str, inner: &toml::value::Table) -> Result<()> {
+    match inner.get("subdirectory") {
+        Some(value) if !value.is_str() => Err(UvrError::ManifestParse(format!(
+            "dependency `{key}` in [{section}]: `subdirectory` must be a string."
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -387,130 +526,415 @@ fn parse_dep_field(field: &str) -> Vec<(String, DependencySpec)> {
     result
 }
 
-/// Pick the dependency name that a `Remotes:` URL should bind to.
-///
-/// 1. If the URL-derived name (e.g. `uvr-r` from `nbafrank/uvr-r`) already
-///    matches a dep declared in Imports/Depends/Suggests, use that.
-/// 2. Otherwise try common R companion-package suffixes (`-r`, `_r`, `.r`):
-///    `uvr-r` → look for `uvr`. Strips one suffix at a time.
-/// 3. Otherwise fall back to the URL-derived name (preserves prior behavior
-///    when nothing better matches; the dep is then inserted as a new entry
-///    with a git source).
-fn resolve_remote_pkg_name(
+fn match_remote_pkg_name(
     url_pkg: &str,
     dependencies: &BTreeMap<String, DependencySpec>,
     dev_dependencies: &BTreeMap<String, DependencySpec>,
-) -> String {
+) -> Option<String> {
     let known = |name: &str| dependencies.contains_key(name) || dev_dependencies.contains_key(name);
     if known(url_pkg) {
-        return url_pkg.to_string();
+        return Some(url_pkg.to_string());
     }
     for suffix in ["-r", "_r", ".r", "-R", "_R", ".R"] {
         if let Some(stripped) = url_pkg.strip_suffix(suffix) {
             if !stripped.is_empty() && known(stripped) {
-                return stripped.to_string();
+                return Some(stripped.to_string());
             }
         }
     }
-    url_pkg.to_string()
+    None
 }
 
-/// Parse an R `Remotes:` field into `(package_name, DependencySpec)` pairs.
-///
-/// Supports devtools/remotes-style GitHub entries plus uvr's `forgejo::`
-/// and `gitlab::`:
-/// - `user/repo` → `git = "user/repo"`
-/// - `user/repo@ref` → `git = "user/repo", rev = "ref"`
-/// - `github::user/repo[@ref]` → same (explicit prefix)
-/// - `pkgname=user/repo[@ref]` → explicit package name binding
-/// - `forgejo::host/owner/repo[@ref]` → `git = "forgejo::host/owner/repo", rev = "ref"`
-/// - `gitlab::host/group/.../project[@ref]` → `git = "gitlab::host/group/.../project", rev = "ref"`
-///
-/// Entries with other prefixes (`bitbucket::`, `git::`, `url::`,
-/// `local::`, `bioc::`) are skipped for now — the caller keeps whatever
-/// version-based spec it already had from `Imports:`.
-///
-/// Visible to the github registry so it can walk transitive `Remotes:`
-/// chains during `uvr lock` (#84) — and to the forgejo/gitlab registries
-/// for the same reason.
-pub(crate) fn parse_remotes_field(field: &str) -> Vec<(String, DependencySpec)> {
-    let mut result = Vec::new();
-    for entry in field.split(',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RemoteProvider {
+    GitHub,
+    Forgejo,
+    Gitlab,
+}
 
-        // Three registries are translated today: github (the bare/`github::`
-        // form, returning `git = "owner/repo"`), forgejo (the
-        // `forgejo::host/owner/repo` form), and gitlab (the
-        // `gitlab::host/group/.../project` form) — the latter two return
-        // their prefix verbatim in `git` so the lock-time BFS can dispatch
-        // on it. Other prefixes (`bitbucket::`, `git::`, `url::`,
-        // `local::`, `bioc::`) are skipped — the caller keeps whatever
-        // version-based spec it already had from `Imports:`.
-        if let Some(body) = entry.strip_prefix("forgejo::") {
-            if let Some(parsed) = parse_forgejo_entry(body) {
-                result.push(parsed);
-            }
-            continue;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSource {
+    pub name: String,
+    pub explicit_name: bool,
+    pub provider: RemoteProvider,
+    pub repository: String,
+    pub requested_ref: Option<String>,
+    pub subdirectory: Option<String>,
+}
+
+impl RemoteSource {
+    pub fn git_spec(&self) -> String {
+        match self.provider {
+            RemoteProvider::GitHub => self.repository.clone(),
+            RemoteProvider::Forgejo => format!("forgejo::{}", self.repository),
+            RemoteProvider::Gitlab => format!("gitlab::{}", self.repository),
         }
-        if let Some(body) = entry.strip_prefix("gitlab::") {
-            if let Some(parsed) = parse_gitlab_entry(body) {
-                result.push(parsed);
+    }
+
+    fn dependency_spec(&self) -> DependencySpec {
+        DependencySpec::Detailed(DetailedDep {
+            git: Some(self.git_spec()),
+            exact: self.explicit_name,
+            rev: self.requested_ref.clone(),
+            subdirectory: self.subdirectory.clone(),
+            ..Default::default()
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteEntry {
+    Source(RemoteSource),
+    Unsupported {
+        entry: String,
+        reason: String,
+        bound: bool,
+    },
+}
+
+pub(crate) type CompatibleRemote = (String, String, Option<String>);
+
+pub(crate) fn compatible_remote_entries(
+    entries: Vec<RemoteEntry>,
+) -> Result<Vec<CompatibleRemote>> {
+    let mut compatible = Vec::new();
+    for entry in entries {
+        match entry {
+            RemoteEntry::Source(source) if source.subdirectory.is_some() => {
+                return Err(UvrError::Other(format!(
+                    "legacy Remotes tuple cannot represent nested package '{}' from '{}'; use \
+                     the rich RemoteEntry resolver API",
+                    source.name,
+                    remote_source_target(&source)
+                )));
             }
-            continue;
+            RemoteEntry::Source(source) => {
+                let git = source.git_spec();
+                compatible.push((source.name, git, source.requested_ref));
+            }
+            RemoteEntry::Unsupported {
+                entry,
+                reason,
+                bound: true,
+            } => {
+                return Err(UvrError::Other(format!(
+                    "legacy Remotes tuple cannot represent unsupported bound entry '{entry}': \
+                     {reason}; use the rich RemoteEntry resolver API"
+                )));
+            }
+            RemoteEntry::Unsupported { bound: false, .. } => {}
         }
-        if let Some((prefix, _)) = entry.split_once("::") {
-            if prefix != "github" {
+    }
+    Ok(compatible)
+}
+
+fn remote_source_target(source: &RemoteSource) -> String {
+    let mut target = source.git_spec();
+    if let Some(subdirectory) = &source.subdirectory {
+        target.push(':');
+        target.push_str(subdirectory);
+    }
+    if let Some(requested_ref) = &source.requested_ref {
+        target.push('@');
+        target.push_str(requested_ref);
+    }
+    target
+}
+
+pub(crate) fn parse_remotes_field_rich(field: &str) -> Vec<RemoteEntry> {
+    let mut result = Vec::new();
+    for entry in field
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (provider, body, explicit_name) = match split_remote_prefix_and_alias(entry) {
+            Ok(Some(parts)) => parts,
+            Ok(None) => continue,
+            Err(reason) => {
+                result.push(RemoteEntry::Unsupported {
+                    entry: entry.to_string(),
+                    reason,
+                    bound: true,
+                });
                 continue;
             }
-        }
-        let body = entry.strip_prefix("github::").unwrap_or(entry);
-
-        // Optional `pkgname=` override.
-        let (explicit_name, path) = match body.split_once('=') {
-            Some((n, p)) if !n.trim().is_empty() && p.trim().contains('/') => {
-                (Some(n.trim().to_string()), p.trim())
-            }
-            _ => (None, body),
         };
 
-        // Split off `@ref` (branch/tag/SHA) and optional `#PR` (dropped).
-        let (repo_path, rev) = match path.split_once('@') {
-            Some((r, ref_)) => {
-                let ref_ = ref_.split_once('#').map_or(ref_, |(r, _pr)| r).trim();
-                let rev = if ref_.is_empty() {
-                    None
-                } else {
-                    Some(ref_.to_string())
-                };
-                (r.trim(), rev)
-            }
-            None => (path.split_once('#').map_or(path, |(p, _pr)| p).trim(), None),
+        let parsed = match provider {
+            RemoteProvider::GitHub => parse_github_remote(entry, body, explicit_name),
+            RemoteProvider::Forgejo => parse_forgejo_remote(entry, body, explicit_name),
+            RemoteProvider::Gitlab => parse_gitlab_remote(entry, body, explicit_name),
         };
-
-        if !repo_path.contains('/') {
-            continue;
+        if let Some(parsed) = parsed {
+            result.push(parsed);
         }
-        let pkg_name = explicit_name.unwrap_or_else(|| {
-            repo_path
-                .rsplit_once('/')
-                .map_or(repo_path, |(_, name)| name)
-                .to_string()
-        });
-        if pkg_name.is_empty() {
-            continue;
-        }
-
-        let spec = DependencySpec::Detailed(DetailedDep {
-            git: Some(repo_path.to_string()),
-            rev,
-            ..Default::default()
-        });
-        result.push((pkg_name, spec));
     }
     result
+}
+
+type RemotePrefixAlias<'a> = (RemoteProvider, &'a str, Option<String>);
+
+fn split_remote_prefix_and_alias(
+    entry: &str,
+) -> std::result::Result<Option<RemotePrefixAlias<'_>>, String> {
+    let (provider, body, alias_first) = if let Some(body) = entry.strip_prefix("github::") {
+        (RemoteProvider::GitHub, body, false)
+    } else if let Some(body) = entry.strip_prefix("forgejo::") {
+        (RemoteProvider::Forgejo, body, false)
+    } else if let Some(body) = entry.strip_prefix("gitlab::") {
+        (RemoteProvider::Gitlab, body, false)
+    } else {
+        (RemoteProvider::GitHub, entry, true)
+    };
+
+    let (explicit_name, target) = split_remote_alias(body)?;
+    if !alias_first {
+        return Ok(Some((provider, target, explicit_name)));
+    }
+
+    let (provider, target) = if let Some(body) = target.strip_prefix("github::") {
+        (RemoteProvider::GitHub, body)
+    } else if let Some(body) = target.strip_prefix("forgejo::") {
+        (RemoteProvider::Forgejo, body)
+    } else if let Some(body) = target.strip_prefix("gitlab::") {
+        (RemoteProvider::Gitlab, body)
+    } else if target.contains("::") {
+        if explicit_name.is_some() {
+            return Err("the bound alias uses an unsupported remote provider".to_string());
+        }
+        return Ok(None);
+    } else {
+        (RemoteProvider::GitHub, target)
+    };
+    Ok(Some((provider, target, explicit_name)))
+}
+
+fn split_remote_alias(body: &str) -> std::result::Result<(Option<String>, &str), String> {
+    let Some((name, target)) = body.split_once('=') else {
+        return Ok((None, body.trim()));
+    };
+    if name.contains('/') {
+        return Ok((None, body.trim()));
+    }
+    let name = name.trim();
+    if !crate::package_name::is_valid(name) {
+        return Err(format!("'{name}' is not a valid explicit package alias"));
+    }
+    if !target.contains('/') {
+        return Err(format!(
+            "the bound alias '{name}' has a malformed remote target"
+        ));
+    }
+    Ok((Some(name.to_string()), target.trim()))
+}
+
+fn github_remote_is_bound(explicit_name: bool, target: &str) -> bool {
+    if explicit_name {
+        return true;
+    }
+    let path = target.split(['@', '#']).next().unwrap_or(target).trim();
+    let Some((_owner, tail)) = path.split_once('/') else {
+        return false;
+    };
+    tail.contains('/') || tail.contains(':')
+}
+
+fn unsupported_remote(entry: &str, reason: impl Into<String>, bound: bool) -> RemoteEntry {
+    RemoteEntry::Unsupported {
+        entry: entry.to_string(),
+        reason: reason.into(),
+        bound,
+    }
+}
+
+fn parse_github_remote(
+    entry: &str,
+    target: &str,
+    explicit_name: Option<String>,
+) -> Option<RemoteEntry> {
+    let bound = github_remote_is_bound(explicit_name.is_some(), target);
+    if target.contains('#') {
+        return Some(unsupported_remote(
+            entry,
+            "GitHub pull-request revisions (`#<number>`) are not supported",
+            bound,
+        ));
+    }
+
+    let (path, requested_ref) = match target.split_once('@') {
+        Some((path, requested_ref))
+            if crate::registry::github::is_valid_git_ref(requested_ref.trim()) =>
+        {
+            (path.trim(), Some(requested_ref.trim().to_string()))
+        }
+        Some(_) => {
+            return Some(unsupported_remote(
+                entry,
+                "the GitHub revision is empty, malformed, or unsupported",
+                bound,
+            ));
+        }
+        None => (target.trim(), None),
+    };
+
+    let Some((owner, tail)) = path.split_once('/') else {
+        return explicit_name
+            .map(|_| unsupported_remote(entry, "expected a GitHub owner/repository path", true));
+    };
+    let (repo, subdirectory) = if let Some((repo, subdirectory)) = tail.split_once(':') {
+        if repo.contains('/') {
+            return Some(unsupported_remote(
+                entry,
+                "the canonical colon form is owner/repository:subdirectory",
+                true,
+            ));
+        }
+        (repo, Some(subdirectory))
+    } else if let Some((repo, subdirectory)) = tail.split_once('/') {
+        (repo, Some(subdirectory))
+    } else {
+        (tail, None)
+    };
+
+    let repository = format!("{owner}/{repo}");
+    if !crate::registry::github::is_valid_github_repo_spec(&repository) {
+        return Some(unsupported_remote(
+            entry,
+            "the GitHub owner/repository path is malformed",
+            bound,
+        ));
+    }
+    let subdirectory = match subdirectory {
+        Some(path) => match crate::subdirectory::validate(path) {
+            Ok(()) => Some(path.to_string()),
+            Err(error) => return Some(unsupported_remote(entry, error.to_string(), true)),
+        },
+        None => None,
+    };
+    let name = explicit_name.clone().unwrap_or_else(|| {
+        subdirectory
+            .as_deref()
+            .and_then(|path| path.rsplit('/').next())
+            .unwrap_or(repo)
+            .to_string()
+    });
+
+    Some(RemoteEntry::Source(RemoteSource {
+        name,
+        explicit_name: explicit_name.is_some(),
+        provider: RemoteProvider::GitHub,
+        repository,
+        requested_ref,
+        subdirectory,
+    }))
+}
+
+fn non_github_remote_is_bound(provider: RemoteProvider, explicit_name: bool, target: &str) -> bool {
+    if explicit_name {
+        return true;
+    }
+    let path = target.split(['@', '#']).next().unwrap_or(target).trim();
+    let Some((_host, project)) = path.split_once('/') else {
+        return false;
+    };
+    if project.contains(':') {
+        return true;
+    }
+    provider == RemoteProvider::Forgejo && project.split('/').count() > 2
+}
+
+fn parse_remote_path_and_ref<'a>(
+    entry: &str,
+    target: &'a str,
+    provider: &str,
+    bound: bool,
+) -> std::result::Result<(&'a str, Option<String>), RemoteEntry> {
+    if target.contains('#') {
+        return Err(unsupported_remote(
+            entry,
+            format!("{provider} `#` revision and pull-request forms are not supported"),
+            bound,
+        ));
+    }
+    match target.split_once('@') {
+        Some((path, requested_ref))
+            if crate::registry::github::is_valid_git_ref(requested_ref.trim()) =>
+        {
+            Ok((path.trim(), Some(requested_ref.trim().to_string())))
+        }
+        Some(_) => Err(unsupported_remote(
+            entry,
+            format!("the {provider} revision is empty, malformed, or unsupported"),
+            bound,
+        )),
+        None => Ok((target.trim(), None)),
+    }
+}
+
+fn parse_forgejo_remote(
+    entry: &str,
+    body: &str,
+    explicit_name: Option<String>,
+) -> Option<RemoteEntry> {
+    let bound = non_github_remote_is_bound(RemoteProvider::Forgejo, explicit_name.is_some(), body);
+    let (path, requested_ref) = match parse_remote_path_and_ref(entry, body, "Forgejo", bound) {
+        Ok(parts) => parts,
+        Err(unsupported) => return Some(unsupported),
+    };
+    let Some(parsed) = crate::registry::forgejo::parse_forgejo_parts(path) else {
+        return Some(unsupported_remote(
+            entry,
+            "the Forgejo target is malformed or uses an unsupported package directory",
+            bound,
+        ));
+    };
+    Some(RemoteEntry::Source(RemoteSource {
+        name: explicit_name.clone().unwrap_or_else(|| parsed.repo.clone()),
+        explicit_name: explicit_name.is_some(),
+        provider: RemoteProvider::Forgejo,
+        repository: format!("{}/{}/{}", parsed.host, parsed.owner, parsed.repo),
+        requested_ref,
+        subdirectory: None,
+    }))
+}
+
+fn parse_gitlab_remote(
+    entry: &str,
+    body: &str,
+    explicit_name: Option<String>,
+) -> Option<RemoteEntry> {
+    let path = body.split(['@', '#']).next().unwrap_or(body).trim();
+    if path.contains("/-/") {
+        return Some(unsupported_remote(
+            entry,
+            "GitLab package directories (`/-/<path>`) are unsupported; package-directory targets are only supported on GitHub",
+            true,
+        ));
+    }
+
+    let bound = non_github_remote_is_bound(RemoteProvider::Gitlab, explicit_name.is_some(), body);
+    let (path, requested_ref) = match parse_remote_path_and_ref(entry, body, "GitLab", bound) {
+        Ok(parts) => parts,
+        Err(unsupported) => return Some(unsupported),
+    };
+    let Some(parsed) = crate::registry::gitlab::parse_gitlab_parts(path) else {
+        return Some(unsupported_remote(
+            entry,
+            "the GitLab target is malformed or uses an unsupported package directory",
+            bound,
+        ));
+    };
+    Some(RemoteEntry::Source(RemoteSource {
+        name: explicit_name
+            .clone()
+            .unwrap_or_else(|| parsed.project_name().to_string()),
+        explicit_name: explicit_name.is_some(),
+        provider: RemoteProvider::Gitlab,
+        repository: format!("{}/{}", parsed.host, parsed.project_path),
+        requested_ref,
+        subdirectory: None,
+    }))
 }
 
 /// Extract R version constraint from a `Depends:` field value.
@@ -545,112 +969,6 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     tmp.persist(path)
         .map_err(|e| crate::error::UvrError::Io(e.error))?;
     Ok(())
-}
-
-/// Parse the `host/owner/repo[@ref]` body of a `forgejo::`-prefixed
-/// `Remotes:` entry into `(pkg_name, DependencySpec)`. The package name
-/// defaults to the repo segment. Returns `None` if the body is malformed.
-///
-/// The `git` field stores the *full* `"forgejo::host/owner/repo"` string
-/// (prefix included) so downstream code that walks `Remotes:` chains can
-/// tell forgejo and github specs apart by string prefix.
-fn parse_forgejo_entry(body: &str) -> Option<(String, DependencySpec)> {
-    // Optional `pkgname=` override.
-    let (explicit_name, path) = match body.split_once('=') {
-        Some((n, p)) if !n.trim().is_empty() && p.trim().contains('/') => {
-            (Some(n.trim().to_string()), p.trim())
-        }
-        _ => (None, body),
-    };
-
-    let (path_no_anchor, rev) = match path.split_once('@') {
-        Some((p, r)) => {
-            let r = r.split('#').next().unwrap_or(r).trim();
-            (
-                p.trim(),
-                if r.is_empty() {
-                    None
-                } else {
-                    Some(r.to_string())
-                },
-            )
-        }
-        None => (path.split('#').next().unwrap_or(path).trim(), None),
-    };
-
-    // Validate the host/owner/repo shape through the shared parser so the
-    // manifest accepts/rejects the same specs as the CLI and resolver (#108).
-    // The pkgname= override and @ref/#anchor handling above are Remotes-field
-    // syntax the shared parser doesn't know about, so we strip them first.
-    let parsed = crate::registry::forgejo::parse_forgejo_parts(path_no_anchor)?;
-    let pkg_name = explicit_name.unwrap_or_else(|| parsed.repo.clone());
-    if pkg_name.is_empty() {
-        return None;
-    }
-
-    let spec = DependencySpec::Detailed(DetailedDep {
-        git: Some(format!(
-            "forgejo::{}/{}/{}",
-            parsed.host, parsed.owner, parsed.repo
-        )),
-        rev,
-        ..Default::default()
-    });
-    Some((pkg_name, spec))
-}
-
-/// Parse the `host/group[/subgroup...]/project[@ref]` body of a
-/// `gitlab::`-prefixed `Remotes:` entry into `(pkg_name, DependencySpec)`.
-/// The package name defaults to the project segment. Returns `None` if the
-/// body is malformed. Mirrors [`parse_forgejo_entry`] — the difference is
-/// that GitLab's namespace path can nest arbitrarily deep, which
-/// [`crate::registry::gitlab::parse_gitlab_parts`] already accounts for.
-///
-/// The `git` field stores the *full* `"gitlab::host/group/.../project"`
-/// string (prefix included) so downstream code that walks `Remotes:`
-/// chains can tell gitlab specs apart from github/forgejo ones by string
-/// prefix.
-fn parse_gitlab_entry(body: &str) -> Option<(String, DependencySpec)> {
-    // Optional `pkgname=` override.
-    let (explicit_name, path) = match body.split_once('=') {
-        Some((n, p)) if !n.trim().is_empty() && p.trim().contains('/') => {
-            (Some(n.trim().to_string()), p.trim())
-        }
-        _ => (None, body),
-    };
-
-    let (path_no_anchor, rev) = match path.split_once('@') {
-        Some((p, r)) => {
-            let r = r.split('#').next().unwrap_or(r).trim();
-            (
-                p.trim(),
-                if r.is_empty() {
-                    None
-                } else {
-                    Some(r.to_string())
-                },
-            )
-        }
-        None => (path.split('#').next().unwrap_or(path).trim(), None),
-    };
-
-    // Validate the host/group/.../project shape through the shared parser
-    // so the manifest accepts/rejects the same specs as the CLI and
-    // resolver. The pkgname= override and @ref/#anchor handling above are
-    // Remotes-field syntax the shared parser doesn't know about, so we
-    // strip them first.
-    let parsed = crate::registry::gitlab::parse_gitlab_parts(path_no_anchor)?;
-    let pkg_name = explicit_name.unwrap_or_else(|| parsed.project_name().to_string());
-    if pkg_name.is_empty() {
-        return None;
-    }
-
-    let spec = DependencySpec::Detailed(DetailedDep {
-        git: Some(format!("gitlab::{}/{}", parsed.host, parsed.project_path)),
-        rev,
-        ..Default::default()
-    });
-    Some((pkg_name, spec))
 }
 
 #[cfg(test)]
@@ -907,8 +1225,6 @@ Remotes:
 
     #[test]
     fn description_remotes_unmatched_falls_back_to_url_name() {
-        // Remote name doesn't match anything in Imports/Suggests and doesn't
-        // strip to a known dep — keep prior behavior (insert as new dep).
         let dcf = r#"Package: thing
 Imports:
     foo
@@ -920,9 +1236,122 @@ Remotes:
             m.dependencies.get("totally-unrelated").unwrap().git(),
             Some("user/totally-unrelated")
         );
-        // foo stays unsourced.
         let foo = m.dependencies.get("foo").unwrap();
         assert!(foo.git().is_none(), "foo should remain version-only");
+    }
+
+    #[test]
+    fn description_import_rejects_bound_unsupported_alias() {
+        let error = Manifest::from_description_str(
+            "Package: parent\nImports: Alias\n\
+             Remotes: Alias=url::https://example.com/pkg.tar.gz\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unsupported bound Remotes entry"), "{error}");
+        assert!(error.contains("Alias=url::"), "{error}");
+    }
+
+    #[test]
+    fn description_import_skips_unbound_unsupported_root_hint() {
+        let manifest = Manifest::from_description_str(
+            "Package: parent\nImports: root\nRemotes: owner/root#42\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.dependencies.get("root"),
+            Some(&DependencySpec::Version("*".to_string()))
+        );
+    }
+
+    #[test]
+    fn description_import_rejects_unmatched_unaliased_nested_remote() {
+        let error = Manifest::from_description_str(
+            "Package: parent\nImports: ActualPackage\n\
+             Remotes: owner/mono/packages/different\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unaliased nested Remotes entry"), "{error}");
+        assert!(error.contains("PackageName="), "{error}");
+    }
+
+    #[test]
+    fn description_import_matches_unaliased_nested_remote_to_declared_dependency() {
+        let manifest = Manifest::from_description_str(
+            "Package: parent\nImports: NestedPkg\n\
+             Remotes: owner/mono/packages/NestedPkg@main\n",
+        )
+        .unwrap();
+        let dependency = manifest.dependencies.get("NestedPkg").unwrap();
+        assert_eq!(dependency.git(), Some("owner/mono"));
+        assert_eq!(dependency.subdirectory(), Some("packages/NestedPkg"));
+    }
+
+    #[test]
+    fn description_differing_root_alias_survives_manifest_round_trip() {
+        let imported = Manifest::from_description_str(
+            "Package: parent\nImports: Alias\nRemotes: Alias=owner/repo@main\n",
+        )
+        .unwrap();
+        let serialized = imported.to_toml_string().unwrap();
+        let reparsed: Manifest = serialized.parse().unwrap();
+        let dependency = reparsed.dependencies.get("Alias").unwrap();
+        assert_eq!(dependency.git(), Some("owner/repo"));
+        assert_eq!(dependency.version_req(), None);
+        let DependencySpec::Detailed(dependency) = dependency else {
+            panic!("expected detailed dependency");
+        };
+        assert!(dependency.exact);
+        assert_eq!(dependency.rev.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn description_same_name_root_alias_survives_manifest_round_trip() {
+        let imported = Manifest::from_description_str(
+            "Package: parent\nImports: repo\nRemotes: repo=owner/repo@main\n",
+        )
+        .unwrap();
+        let serialized = imported.to_toml_string().unwrap();
+        assert!(serialized.contains("exact = true"), "{serialized}");
+        let reparsed: Manifest = serialized.parse().unwrap();
+        let DependencySpec::Detailed(dependency) = reparsed.dependencies.get("repo").unwrap()
+        else {
+            panic!("expected detailed dependency");
+        };
+        assert!(dependency.exact);
+    }
+
+    #[test]
+    fn description_unaliased_root_remains_inexact() {
+        let imported = Manifest::from_description_str(
+            "Package: parent\nImports: repo\nRemotes: owner/repo@main\n",
+        )
+        .unwrap();
+        let DependencySpec::Detailed(dependency) = imported.dependencies.get("repo").unwrap()
+        else {
+            panic!("expected detailed dependency");
+        };
+        assert!(!dependency.exact);
+        assert!(!imported.to_toml_string().unwrap().contains("exact ="));
+    }
+
+    #[test]
+    fn description_explicit_alias_marker_is_provider_neutral() {
+        let imported = Manifest::from_description_str(
+            "Package: parent\nImports: GithubAlias, ForgejoAlias, GitlabAlias\n\
+             Remotes: GithubAlias=owner/repo, \
+             ForgejoAlias=forgejo::code.example/team/repo, \
+             GitlabAlias=gitlab::gitlab.example/group/repo\n",
+        )
+        .unwrap();
+        for name in ["GithubAlias", "ForgejoAlias", "GitlabAlias"] {
+            let DependencySpec::Detailed(dependency) = imported.dependencies.get(name).unwrap()
+            else {
+                panic!("expected detailed dependency for {name}");
+            };
+            assert!(dependency.exact, "explicit alias marker missing for {name}");
+        }
     }
 
     #[test]
@@ -987,8 +1416,15 @@ bioc = true
     fn parse_remotes_field_keeps_forgejo_and_gitlab() {
         let field = "forgejo::codefloe.com/pat-s/mypkg@v0.1.0, github::user/a, \
                      gitlab::other/x, gitlab::gitlab.com/my-group/my-sub/thing@v2.0";
-        let v = parse_remotes_field(field);
-        let names: Vec<&str> = v.iter().map(|(n, _)| n.as_str()).collect();
+        let v = parse_remotes_field_rich(field);
+        let sources: Vec<&RemoteSource> = v
+            .iter()
+            .filter_map(|entry| match entry {
+                RemoteEntry::Source(source) => Some(source),
+                RemoteEntry::Unsupported { .. } => None,
+            })
+            .collect();
+        let names: Vec<&str> = sources.iter().map(|source| source.name.as_str()).collect();
         // "other/x" has only two segments (host + project, no group) —
         // not a valid gitlab spec — so it's dropped, not because gitlab
         // is unsupported.
@@ -996,26 +1432,255 @@ bioc = true
 
         // The forgejo entry stores the full `forgejo::host/owner/repo` in
         // the `git` field, with the ref split into `rev`.
-        match &v[0].1 {
-            DependencySpec::Detailed(d) => {
-                assert_eq!(d.git.as_deref(), Some("forgejo::codefloe.com/pat-s/mypkg"));
-                assert_eq!(d.rev.as_deref(), Some("v0.1.0"));
-            }
-            other => panic!("expected Detailed, got {other:?}"),
-        }
+        assert_eq!(sources[0].git_spec(), "forgejo::codefloe.com/pat-s/mypkg");
+        assert_eq!(sources[0].requested_ref.as_deref(), Some("v0.1.0"));
 
-        // The gitlab entry stores the full `gitlab::host/group/.../project`
-        // string (nested subgroup included), with the ref split into `rev`.
-        match &v[2].1 {
-            DependencySpec::Detailed(d) => {
-                assert_eq!(
-                    d.git.as_deref(),
-                    Some("gitlab::gitlab.com/my-group/my-sub/thing")
-                );
-                assert_eq!(d.rev.as_deref(), Some("v2.0"));
-            }
-            other => panic!("expected Detailed, got {other:?}"),
+        // The gitlab entry keeps its nested subgroup and revision separately.
+        assert_eq!(
+            sources[2].git_spec(),
+            "gitlab::gitlab.com/my-group/my-sub/thing"
+        );
+        assert_eq!(sources[2].requested_ref.as_deref(), Some("v2.0"));
+    }
+
+    #[test]
+    fn github_remotes_keep_repository_ref_and_subdirectory_separate() {
+        let entries = parse_remotes_field_rich(
+            "SlashPkg=owner/mono/packages/slash@feature/x, \
+             ColonPkg=github::owner/mono:packages/colon/more@v2.0, \
+             github::LegacyPkg=owner/mono/r/legacy, owner/mono/r/inferred",
+        );
+        let sources: Vec<&RemoteSource> = entries
+            .iter()
+            .map(|entry| match entry {
+                RemoteEntry::Source(source) => source,
+                other => panic!("expected source, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(sources.len(), 4);
+
+        assert_eq!(sources[0].name, "SlashPkg");
+        assert!(sources[0].explicit_name);
+        assert_eq!(sources[0].provider, RemoteProvider::GitHub);
+        assert_eq!(sources[0].repository, "owner/mono");
+        assert_eq!(sources[0].requested_ref.as_deref(), Some("feature/x"));
+        assert_eq!(sources[0].subdirectory.as_deref(), Some("packages/slash"));
+
+        assert_eq!(sources[1].name, "ColonPkg");
+        assert_eq!(sources[1].repository, "owner/mono");
+        assert_eq!(sources[1].requested_ref.as_deref(), Some("v2.0"));
+        assert_eq!(
+            sources[1].subdirectory.as_deref(),
+            Some("packages/colon/more")
+        );
+
+        assert_eq!(sources[2].name, "LegacyPkg");
+        assert_eq!(sources[2].subdirectory.as_deref(), Some("r/legacy"));
+        assert_eq!(sources[3].name, "inferred");
+        assert!(!sources[3].explicit_name);
+        assert_eq!(sources[3].subdirectory.as_deref(), Some("r/inferred"));
+    }
+
+    #[test]
+    fn compatibility_remotes_adapter_rejects_nested_entries() {
+        let error = compatible_remote_entries(parse_remotes_field_rich(
+            "owner/root@main, github::owner/mono/pkgs/nested@v1",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot represent nested package"), "{error}");
+    }
+
+    #[test]
+    fn compatibility_remotes_adapter_rejects_bound_unsupported_entries() {
+        let error = compatible_remote_entries(parse_remotes_field_rich(
+            "Alias=forgejo::code.example/team/pkg@",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unsupported bound entry"), "{error}");
+        assert!(error.contains("revision"), "{error}");
+    }
+
+    #[test]
+    fn compatibility_remotes_adapter_skips_unbound_unsupported_entries() {
+        let compatible =
+            compatible_remote_entries(parse_remotes_field_rich("owner/root#42")).unwrap();
+        assert!(compatible.is_empty());
+    }
+
+    #[test]
+    fn compatibility_remotes_adapter_keeps_representable_roots() {
+        let compatible = compatible_remote_entries(parse_remotes_field_rich(
+            "owner/root@main, Alias=forgejo::code.example/team/pkg@dev, \
+             gitlab::gitlab.example/group/project@release",
+        ))
+        .unwrap();
+        assert_eq!(
+            compatible,
+            vec![
+                (
+                    "root".to_string(),
+                    "owner/root".to_string(),
+                    Some("main".to_string())
+                ),
+                (
+                    "Alias".to_string(),
+                    "forgejo::code.example/team/pkg".to_string(),
+                    Some("dev".to_string())
+                ),
+                (
+                    "project".to_string(),
+                    "gitlab::gitlab.example/group/project".to_string(),
+                    Some("release".to_string())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_or_unsupported_github_remotes_record_binding() {
+        let entries = parse_remotes_field_rich(
+            "owner/root#42, Alias=owner/root@*release, \
+             owner/mono/pkgs/nested#7, owner/mono/pkgs/../escape, \
+             AliasUrl=url::https://example.com/pkg.tar.gz, \
+             AliasBad=not-a-remote, url::https://example.com/pkg.tar.gz",
+        );
+        assert_eq!(entries.len(), 6);
+        let unsupported: Vec<(&str, bool)> = entries
+            .iter()
+            .map(|entry| match entry {
+                RemoteEntry::Unsupported { entry, bound, .. } => (entry.as_str(), *bound),
+                other => panic!("expected unsupported entry, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(unsupported[0], ("owner/root#42", false));
+        assert_eq!(unsupported[1], ("Alias=owner/root@*release", true));
+        assert_eq!(unsupported[2], ("owner/mono/pkgs/nested#7", true));
+        assert_eq!(unsupported[3], ("owner/mono/pkgs/../escape", true));
+        assert_eq!(
+            unsupported[4],
+            ("AliasUrl=url::https://example.com/pkg.tar.gz", true)
+        );
+        assert_eq!(unsupported[5], ("AliasBad=not-a-remote", true));
+    }
+
+    #[test]
+    fn explicit_aliases_are_preserved_for_all_git_providers() {
+        let entries = parse_remotes_field_rich(
+            "GitHubAlias=github::owner/repo@main, \
+             ForgejoAlias=forgejo::code.example/team/repo@dev, \
+             GitlabAlias=gitlab::gitlab.example/group/repo@release",
+        );
+        let sources: Vec<&RemoteSource> = entries
+            .iter()
+            .map(|entry| match entry {
+                RemoteEntry::Source(source) => source,
+                other => panic!("expected source, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(sources.len(), 3);
+        for source in sources {
+            assert!(source.explicit_name);
         }
+    }
+
+    #[test]
+    fn unaliased_gitlab_package_directory_is_bound_unsupported() {
+        let entries = parse_remotes_field_rich("gitlab::host/group/repo/-/subdir");
+        assert!(matches!(
+            entries.as_slice(),
+            [RemoteEntry::Unsupported {
+                bound: true,
+                reason,
+                ..
+            }] if reason.contains("package directories")
+        ));
+    }
+
+    #[test]
+    fn aliased_gitlab_package_directory_is_bound_unsupported() {
+        let entries = parse_remotes_field_rich("Alias=gitlab::host/group/repo/-/subdir");
+        assert!(matches!(
+            entries.as_slice(),
+            [RemoteEntry::Unsupported {
+                bound: true,
+                reason,
+                ..
+            }] if reason.contains("package directories")
+        ));
+    }
+
+    #[test]
+    fn malformed_explicit_aliases_fail_closed_for_all_git_providers() {
+        let entries = parse_remotes_field_rich(
+            "GithubEmpty=owner/repo@, GithubHash=owner/repo@main#7, \
+             ForgejoEmpty=forgejo::code.example/team/repo@, \
+             ForgejoHash=forgejo::code.example/team/repo@main#frag, \
+             ForgejoColon=forgejo::code.example/team/repo:path, \
+             ForgejoSlash=forgejo::code.example/team/repo/path, \
+             GitlabEmpty=gitlab::gitlab.example/group/repo@, \
+             GitlabHash=gitlab::gitlab.example/group/repo@main#frag, \
+             GitlabColon=gitlab::gitlab.example/group/repo:path",
+        );
+        assert_eq!(entries.len(), 9);
+        for entry in entries {
+            match entry {
+                RemoteEntry::Unsupported { bound: true, .. } => {}
+                other => panic!("expected bound unsupported entry, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_unbound_root_hints_remain_unbound_for_all_git_providers() {
+        let entries = parse_remotes_field_rich(
+            "owner/repo@, forgejo::code.example/team/repo@, \
+             gitlab::gitlab.example/group/repo@",
+        );
+        assert_eq!(entries.len(), 3);
+        for entry in entries {
+            match entry {
+                RemoteEntry::Unsupported { bound: false, .. } => {}
+                other => panic!("expected unbound unsupported entry, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn remote_parser_applies_alias_provider_fragment_ref_and_directory_order() {
+        let entries = parse_remotes_field_rich(
+            "Alias=github::owner/mono:packages/nested@feature/x, \
+             Rejected=github::owner/mono:packages/nested@feature/x#12",
+        );
+        let RemoteEntry::Source(source) = &entries[0] else {
+            panic!("expected source");
+        };
+        assert_eq!(source.name, "Alias");
+        assert_eq!(source.repository, "owner/mono");
+        assert_eq!(source.subdirectory.as_deref(), Some("packages/nested"));
+        assert_eq!(source.requested_ref.as_deref(), Some("feature/x"));
+        assert!(matches!(
+            &entries[1],
+            RemoteEntry::Unsupported { bound: true, .. }
+        ));
+    }
+
+    #[test]
+    fn description_colon_remote_preserves_dependency_constraint_and_directory() {
+        let manifest = Manifest::from_description_str(
+            "Package: parent\nImports: NestedPkg (>= 1.2.0)\n\
+             Remotes: NestedPkg=owner/mono:packages/nested@main\n",
+        )
+        .unwrap();
+        let DependencySpec::Detailed(dependency) = manifest.dependencies.get("NestedPkg").unwrap()
+        else {
+            panic!("NestedPkg should be a detailed dependency");
+        };
+        assert_eq!(dependency.git.as_deref(), Some("owner/mono"));
+        assert_eq!(dependency.rev.as_deref(), Some("main"));
+        assert_eq!(dependency.subdirectory.as_deref(), Some("packages/nested"));
+        assert_eq!(dependency.version.as_deref(), Some(">=1.2.0"));
     }
 
     // --- Dotted-key trap detection ---
@@ -1150,6 +1815,164 @@ bioc = true
         );
         let org = m.dependencies.get("org.Hs.eg.db").unwrap();
         assert!(org.is_bioc(), "org.Hs.eg.db should be bioc=true");
+    }
+
+    #[test]
+    fn subdirectory_round_trip() {
+        let toml = r#"
+[project]
+name = "test"
+
+[dependencies.nested]
+git = "owner/repo"
+rev = "main"
+subdirectory = "pkgs/nested"
+
+[dependencies.rooted]
+git = "owner/other"
+"#;
+        let m: Manifest = toml.parse().expect("parse");
+        let nested = m.dependencies.get("nested").unwrap();
+        assert_eq!(nested.git(), Some("owner/repo"));
+        assert_eq!(nested.subdirectory(), Some("pkgs/nested"));
+        assert_eq!(m.dependencies.get("rooted").unwrap().subdirectory(), None);
+
+        let serialized = m.to_toml_string().expect("serialize");
+        assert!(serialized.contains(r#"subdirectory = "pkgs/nested""#));
+        let m2: Manifest = serialized.parse().expect("reparse");
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn subdirectory_inline_table_parses() {
+        let toml = r#"
+[project]
+name = "test"
+
+[dependencies]
+nested = { git = "owner/repo", subdirectory = "pkgs/nested" }
+"#;
+        let m: Manifest = toml.parse().expect("parse");
+        assert_eq!(
+            m.dependencies.get("nested").unwrap().subdirectory(),
+            Some("pkgs/nested")
+        );
+    }
+
+    #[test]
+    fn subdirectory_rejects_unsafe_paths() {
+        for bad in ["../escape", "/abs", "a\\\\b", "", "a//b", "."] {
+            let toml = format!(
+                "[project]\nname = \"t\"\n\n[dependencies.nested]\ngit = \"owner/repo\"\n\
+                 subdirectory = \"{bad}\"\n"
+            );
+            let parsed = toml.parse::<Manifest>();
+            assert!(parsed.is_err(), "should reject {bad}");
+            let err = parsed.unwrap_err().to_string();
+            assert!(err.contains("subdirectory"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn exact_binding_requires_a_valid_git_source() {
+        let cases = [
+            "exact = true\n",
+            "git = \"owner/repo\"\nrev = \"\"\nexact = true\n",
+            "git = \"owner/repo/extra\"\nexact = true\n",
+            "git = \"gitlab::host/group/repo/-/subdir\"\nexact = true\n",
+        ];
+        for dependency in cases {
+            let toml = format!("[project]\nname = \"t\"\n\n[dependencies.repo]\n{dependency}");
+            let error = toml.parse::<Manifest>().unwrap_err().to_string();
+            assert!(error.contains("exact = true"), "{error}");
+            assert!(error.contains("requires a"), "{error}");
+        }
+    }
+
+    #[test]
+    fn subdirectory_requires_a_github_git_source() {
+        let no_git = r#"
+[project]
+name = "t"
+
+[dependencies.nested]
+version = "*"
+subdirectory = "pkgs/nested"
+"#;
+        let err = no_git.parse::<Manifest>().unwrap_err().to_string();
+        assert!(err.contains("requires a `git` source"), "got: {err}");
+
+        for host in ["gitlab::gitlab.com/g/p", "forgejo::codefloe.com/o/r"] {
+            let toml = format!(
+                "[project]\nname = \"t\"\n\n[dependencies.nested]\ngit = \"{host}\"\n\
+                 subdirectory = \"pkgs/nested\"\n"
+            );
+            let err = toml.parse::<Manifest>().unwrap_err().to_string();
+            assert!(err.contains("only supported for GitHub"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn subdirectory_rejects_malformed_github_sources() {
+        for (git, rev) in [
+            ("owner/repo", Some("")),
+            ("owner/repo", Some("a b")),
+            ("", None),
+            ("repo", None),
+            ("owner/", None),
+            ("/repo", None),
+            ("owner/repo/extra", None),
+        ] {
+            let rev_line = rev.map(|r| format!("rev = \"{r}\"\n")).unwrap_or_default();
+            let toml = format!(
+                "[project]\nname = \"t\"\n\n[dependencies.nested]\ngit = \"{git}\"\n{rev_line}\
+                 subdirectory = \"pkgs/nested\"\n"
+            );
+            let parsed = toml.parse::<Manifest>();
+            assert!(parsed.is_err(), "should reject git={git:?} rev={rev:?}");
+            let err = parsed.unwrap_err().to_string();
+            assert!(err.contains("not a valid GitHub source"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn subdirectory_must_be_a_string() {
+        let toml = r#"
+[project]
+name = "t"
+
+[dependencies.nested]
+git = "owner/repo"
+subdirectory = 42
+"#;
+        let err = toml.parse::<Manifest>().unwrap_err().to_string();
+        assert!(err.contains("must be a string"), "got: {err}");
+    }
+
+    #[test]
+    fn programmatic_invalid_subdirectory_is_not_serialized() {
+        let mut manifest = Manifest::new("t", None);
+        for dep in [
+            DetailedDep {
+                git: Some("owner/repo".into()),
+                subdirectory: Some("../escape".into()),
+                ..Default::default()
+            },
+            DetailedDep {
+                git: Some("gitlab::gitlab.com/group/repo".into()),
+                subdirectory: Some("pkgs/nested".into()),
+                ..Default::default()
+            },
+        ] {
+            manifest
+                .dependencies
+                .insert("nested".into(), DependencySpec::Detailed(dep));
+            assert!(manifest.to_toml_string().is_err());
+            let temp = tempfile::TempDir::new().unwrap();
+            let path = temp.path().join("uvr.toml");
+            assert!(manifest.write(&path).is_err());
+            assert!(!path.exists());
+        }
     }
 
     #[test]
