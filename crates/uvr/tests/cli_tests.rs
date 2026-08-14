@@ -65,6 +65,45 @@ fn test_init_here_uses_current_dir() {
 }
 
 #[test]
+fn test_init_rejects_bound_unsupported_description_alias() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("DESCRIPTION"),
+        "Package: parent\nImports: Alias\n\
+         Remotes: Alias=url::https://example.com/pkg.tar.gz\n",
+    )
+    .unwrap();
+
+    uvr_cmd()
+        .args(["init", "--here"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported bound Remotes entry"));
+    assert!(!dir.path().join("uvr.toml").exists());
+}
+
+#[test]
+fn test_init_preserves_explicit_description_alias_in_manifest() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("DESCRIPTION"),
+        "Package: parent\nImports: Alias\nRemotes: Alias=owner/repo@main\n",
+    )
+    .unwrap();
+
+    uvr_cmd()
+        .args(["init", "--here"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let manifest = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let parsed: uvr_core::manifest::Manifest = manifest.parse().unwrap();
+    let dependency = parsed.dependencies.get("Alias").unwrap();
+    assert_eq!(dependency.git(), Some("owner/repo"));
+}
+
+#[test]
 fn test_init_with_r_version() {
     let dir = TempDir::new().unwrap();
     uvr_cmd()
@@ -352,6 +391,153 @@ fn test_import_fails_if_no_renv_lock() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("File not found"));
+}
+
+#[test]
+fn test_import_preserves_github_remote_subdir() {
+    use uvr_core::manifest::{DependencySpec, Manifest};
+
+    let dir = TempDir::new().unwrap();
+    let renv_lock = fixture("sample_renv_subdir.lock");
+    fs::copy(&renv_lock, dir.path().join("renv.lock")).unwrap();
+
+    uvr_cmd()
+        .args(["import"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("GitHub"));
+
+    let content = fs::read_to_string(dir.path().join("uvr.toml")).unwrap();
+    let m: Manifest = content.parse().unwrap();
+
+    let nested = m.dependencies.get("nested").expect("nested dependency");
+    assert_eq!(nested.git(), Some("testuser/monorepo"));
+    assert_eq!(nested.subdirectory(), Some("pkgs/nested"));
+    let DependencySpec::Detailed(nested_detail) = nested else {
+        panic!("nested should be a detailed dependency");
+    };
+    assert_eq!(
+        nested_detail.rev.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
+
+    let rooted = m.dependencies.get("rooted").expect("rooted dependency");
+    assert_eq!(rooted.git(), Some("testuser/rooted"));
+    assert_eq!(rooted.subdirectory(), None);
+}
+
+#[test]
+fn test_import_rejects_an_invalid_remote_subdir() {
+    let dir = TempDir::new().unwrap();
+    let renv_lock = r#"{
+  "R": { "Version": "4.3.2", "Repositories": [] },
+  "Packages": {
+    "escape": {
+      "Package": "escape",
+      "Version": "0.1.0",
+      "Source": "GitHub",
+      "RemoteUsername": "testuser",
+      "RemoteRepo": "monorepo",
+      "RemoteSubdir": "../escape"
+    }
+  }
+}"#;
+    fs::write(dir.path().join("renv.lock"), renv_lock).unwrap();
+
+    uvr_cmd()
+        .args(["import"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("RemoteSubdir"));
+
+    assert!(!dir.path().join("uvr.toml").exists());
+}
+
+#[test]
+fn test_import_rejects_an_invalid_remote_subdir_without_remote_identity() {
+    let dir = TempDir::new().unwrap();
+    let renv_lock = r#"{
+  "R": { "Version": "4.3.2", "Repositories": [] },
+  "Packages": {
+    "escape": {
+      "Package": "escape",
+      "Version": "0.1.0",
+      "Source": "GitHub",
+      "RemoteUsername": "testuser",
+      "RemoteSubdir": "../escape"
+    }
+  }
+}"#;
+    fs::write(dir.path().join("renv.lock"), renv_lock).unwrap();
+
+    uvr_cmd()
+        .args(["import"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("RemoteSubdir"));
+
+    assert!(!dir.path().join("uvr.toml").exists());
+}
+
+#[test]
+fn test_github_subdirectory_round_trips_through_renv() {
+    use uvr_core::manifest::{DependencySpec, Manifest};
+
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("uvr.toml"),
+        "[project]\nname = \"roundtrip\"\n\n[dependencies]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("uvr.lock"),
+        r#"[r]
+version = "4.4.2"
+
+[[package]]
+name = "nested"
+version = "0.1.0"
+source = "github"
+url = "https://api.github.com/repos/testuser/monorepo/tarball/0123456789abcdef0123456789abcdef01234567"
+checksum = "git:0123456789abcdef0123456789abcdef01234567"
+subdirectory = "pkgs/nested"
+"#,
+    )
+    .unwrap();
+
+    uvr_cmd()
+        .args(["export", "--output", "renv.lock"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    fs::remove_file(dir.path().join("uvr.toml")).unwrap();
+    fs::remove_file(dir.path().join("uvr.lock")).unwrap();
+    uvr_cmd()
+        .args(["import", "--name", "roundtrip"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let manifest: Manifest = fs::read_to_string(dir.path().join("uvr.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let dep = manifest
+        .dependencies
+        .get("nested")
+        .expect("nested dependency");
+    assert_eq!(dep.git(), Some("testuser/monorepo"));
+    assert_eq!(dep.subdirectory(), Some("pkgs/nested"));
+    let DependencySpec::Detailed(detail) = dep else {
+        panic!("nested should be a detailed dependency");
+    };
+    assert_eq!(
+        detail.rev.as_deref(),
+        Some("0123456789abcdef0123456789abcdef01234567")
+    );
 }
 
 // ─── export ────────────────────────────────────────────────
