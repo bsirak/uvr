@@ -7,6 +7,7 @@ use uvr_core::installer::binary_install::{
     inspect_tarball, install_binary_package, patch_installed_so_files,
 };
 use uvr_core::installer::download::{DownloadSpec, Downloader};
+use uvr_core::installer::nested_source::{self, NestedProvenance};
 use uvr_core::installer::package_cache;
 use uvr_core::installer::r_cmd_install::RCmdInstall;
 use uvr_core::lockfile::{LockedPackage, Lockfile};
@@ -80,6 +81,16 @@ fn select_pkg_plan<'a>(
     bioc_release: Option<&str>,
 ) -> PkgPlan<'a> {
     let source_url_str = source_url(p, bioc_release);
+
+    // A nested package only exists inside its repository archive; a same-name binary is a different package.
+    if p.subdirectory.is_some() {
+        return PkgPlan {
+            pkg: p,
+            url: source_url_str,
+            fallback_url: None,
+            is_binary: false,
+        };
+    }
 
     for src in custom_binary {
         if let Some(url) = src.binary_url_for(&p.name, &p.version, host, r_minor) {
@@ -172,6 +183,12 @@ pub async fn run_inner(
     library_override: Option<&std::path::Path>,
     timeout: Option<Duration>,
 ) -> Result<()> {
+    let lockfile = project
+        .load_lockfile()
+        .context("Failed to read uvr.lock")?
+        .ok_or_else(|| anyhow::anyhow!("No lockfile found. Run `uvr lock` to generate one."))?;
+    validate_lock_identity(&lockfile)?;
+
     if let Some(lib) = library_override {
         std::fs::create_dir_all(lib)
             .with_context(|| format!("Failed to create library dir: {}", lib.display()))?;
@@ -194,11 +211,6 @@ pub async fn run_inner(
     if crate::commands::init::is_r_package_dir(&project.root) {
         let _ = crate::commands::init::write_rbuildignore(&project.root);
     }
-
-    let lockfile = project
-        .load_lockfile()
-        .context("Failed to read uvr.lock")?
-        .ok_or_else(|| anyhow::anyhow!("No lockfile found. Run `uvr lock` to generate one."))?;
 
     if frozen {
         let fresh = crate::commands::lock::resolve_only(project)
@@ -334,6 +346,8 @@ async fn install_from_lockfile_with_r(
     r_info: Option<(PathBuf, String)>,
     prune: bool,
 ) -> Result<()> {
+    validate_lock_identity(lockfile)?;
+
     let library = library_override
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| project.library_path());
@@ -632,15 +646,19 @@ async fn install_from_lockfile_with_r(
             cache_misses.push(pkg);
             continue;
         }
+        let nested = NestedProvenance::from_locked(pkg)?;
+        let nested_identity = nested.as_ref().map(NestedProvenance::cache_identity);
         if let Some(cached_dir) = package_cache::lookup_any(
             &pkg.name,
             &pkg.version,
-            pkg.checksum.as_deref(),
+            nested_identity.as_deref().or(pkg.checksum.as_deref()),
             &r_minor_str,
-            binary_cache_allowed,
+            binary_cache_allowed && nested.is_none(),
             libr_path.as_deref(),
             binary_flavor.as_deref(),
-        ) {
+        )
+        .filter(|dir| nested_source::provenance_matches(dir, nested.as_ref()))
+        {
             match package_cache::clone_to_library(&cached_dir, &library, &pkg.name) {
                 Ok(()) => {
                     cache_hits.push(pkg);
@@ -849,6 +867,9 @@ async fn install_from_lockfile_with_r(
             .iter()
             .zip(results.iter())
             .map(|(plan, result)| {
+                if plan.pkg.subdirectory.is_some() {
+                    return InstallKind::Source;
+                }
                 if result.used_binary {
                     return InstallKind::Binary;
                 }
@@ -1204,18 +1225,28 @@ async fn install_from_lockfile_with_r(
                     let name = plan.pkg.name.clone();
                     let version = plan.pkg.version.clone();
                     let pb_for_closure = pb.clone();
+                    let nested_dir = match plan.pkg.subdirectory.as_deref() {
+                        Some(sub) => Some(
+                            nested_source::prepare(&result.path, &library, &plan.pkg.name, sub)
+                                .with_context(|| {
+                                    format!(
+                                        "Failed to extract '{}' from subdirectory '{sub}'",
+                                        plan.pkg.name
+                                    )
+                                })?,
+                        ),
+                        None => None,
+                    };
+                    let source_path = match &nested_dir {
+                        Some(dir) => dir.path(),
+                        None => result.path.as_path(),
+                    };
                     installer
-                        .install_streaming(
-                            &result.path,
-                            &library,
-                            &plan.pkg.name,
-                            timeout,
-                            |line| {
-                                let short: String = line.chars().take(50).collect();
-                                pb_for_closure
-                                    .set_message(format!("compiling {name} {version} ({short})"));
-                            },
-                        )
+                        .install_streaming(source_path, &library, &plan.pkg.name, timeout, |line| {
+                            let short: String = line.chars().take(50).collect();
+                            pb_for_closure
+                                .set_message(format!("compiling {name} {version} ({short})"));
+                        })
                         .with_context(|| format!("Failed to install {}", plan.pkg.name))?;
                 }
             }
@@ -1225,16 +1256,29 @@ async fn install_from_lockfile_with_r(
             // Store the newly installed package in the global cache for future reuse.
             // cache_key takes a bool — Binary is true; PureR + Source are false.
             let cache_key_binary = matches!(kind, InstallKind::Binary);
+            let nested_provenance = NestedProvenance::from_locked(plan.pkg)?;
+            let nested_identity = nested_provenance
+                .as_ref()
+                .map(NestedProvenance::cache_identity);
             let key = package_cache::cache_key(
                 &plan.pkg.name,
                 &plan.pkg.version,
-                plan.pkg.checksum.as_deref(),
+                nested_identity.as_deref().or(plan.pkg.checksum.as_deref()),
                 &r_minor_str,
                 cache_key_binary,
                 libr_path.as_deref(),
                 binary_flavor.as_deref(),
             );
             let pkg_dir = library.join(&plan.pkg.name);
+            match &nested_provenance {
+                Some(provenance) => nested_source::write_marker(&pkg_dir, provenance)
+                    .with_context(|| {
+                        format!("Failed to record nested source for {}", plan.pkg.name)
+                    })?,
+                None => nested_source::clear_marker(&pkg_dir).with_context(|| {
+                    format!("Failed to clear nested source for {}", plan.pkg.name)
+                })?,
+            }
             // Recorded inside the entry so `uvr cache clean --r-version` can
             // filter by R minor — the key only carries it hashed.
             let entry_meta = package_cache::EntryMeta {
@@ -1522,7 +1566,21 @@ fn companion_needs_rebuild(desc_path: &std::path::Path, current_r_version: &str)
     built_minor != current_minor
 }
 
+/// Called before any network request, cache use, or library mutation.
+fn validate_lock_identity(lockfile: &Lockfile) -> Result<()> {
+    for pkg in &lockfile.packages {
+        NestedProvenance::from_locked(pkg)?;
+    }
+    Ok(())
+}
+
 fn is_installed(pkg: &LockedPackage, library: &std::path::Path) -> bool {
+    let Ok(nested) = NestedProvenance::from_locked(pkg) else {
+        return false;
+    };
+    if !nested_source::provenance_matches(&library.join(&pkg.name), nested.as_ref()) {
+        return false;
+    }
     let desc_path = library.join(&pkg.name).join("DESCRIPTION");
     let Ok(content) = std::fs::read_to_string(&desc_path) else {
         return false;
@@ -1549,7 +1607,8 @@ fn installed_version(name: &str, library: &std::path::Path) -> Option<String> {
 
 /// Compare two lockfiles for semantic equivalence, ignoring fields that can
 /// legitimately differ between lockfile versions (e.g. `url`, `checksum`).
-/// Compares: R major.minor version + set of (name, version, source, requires) tuples.
+/// Compares: R major.minor version + set of (name, version, source,
+/// subdirectory, requires) tuples.
 fn lockfiles_equivalent(
     a: &uvr_core::lockfile::Lockfile,
     b: &uvr_core::lockfile::Lockfile,
@@ -1572,7 +1631,11 @@ fn lockfiles_equivalent(
         let mut b_reqs = bp.requires.clone();
         a_reqs.sort();
         b_reqs.sort();
-        ap.name == bp.name && ap.version == bp.version && ap.source == bp.source && a_reqs == b_reqs
+        ap.name == bp.name
+            && ap.version == bp.version
+            && ap.source == bp.source
+            && ap.subdirectory == bp.subdirectory
+            && a_reqs == b_reqs
     })
 }
 
@@ -2576,5 +2639,184 @@ Built: R 4.5.0; x86_64-pc-linux-musl; 2025-01-15; unix
             plan.url,
             "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz"
         );
+    }
+
+    const NESTED_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    const NESTED_OTHER_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    fn nested_locked(name: &str, sha: &str, subdirectory: Option<&str>) -> LockedPackage {
+        LockedPackage {
+            name: name.into(),
+            version: "1.1.6".into(),
+            raw_version: None,
+            source: PackageSource::GitHub,
+            checksum: Some(format!("git:{sha}")),
+            requires: vec![],
+            url: Some(format!("https://api.github.com/repos/o/r/tarball/{sha}")),
+            system_requirements: None,
+            dev: false,
+            subdirectory: subdirectory.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn select_plan_forces_source_for_a_nested_package() {
+        let pkg = nested_locked("rlang", NESTED_SHA, Some("pkgs/rlang"));
+        let reg = CranRegistry::for_test(
+            parse_packages_gz(rlang_musl_packages()).unwrap(),
+            "https://rpkgs.example.com/src/contrib".into(),
+        );
+        let custom = vec![&reg];
+        let plan = select_pkg_plan(&pkg, &custom, None, &musl_host(), "4.5", None);
+        assert!(!plan.is_binary);
+        assert_eq!(Some(plan.url.as_str()), pkg.url.as_deref());
+        assert!(plan.fallback_url.is_none());
+    }
+
+    #[test]
+    fn lockfiles_not_equivalent_different_subdirectory() {
+        let make = |subdirectory: Option<&str>| Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".into(),
+                bioc_version: None,
+            },
+            packages: vec![nested_locked("rlang", NESTED_SHA, subdirectory)],
+        };
+        assert!(lockfiles_equivalent(
+            &make(Some("pkgs/rlang")),
+            &make(Some("pkgs/rlang"))
+        ));
+        assert!(!lockfiles_equivalent(
+            &make(Some("pkgs/rlang")),
+            &make(Some("other/rlang"))
+        ));
+        assert!(!lockfiles_equivalent(
+            &make(Some("pkgs/rlang")),
+            &make(None)
+        ));
+    }
+
+    #[test]
+    fn is_installed_distinguishes_nested_identity() {
+        let library = tempfile::TempDir::new().unwrap();
+        fake_installed_pkg(library.path(), "rlang", "1.1.6");
+
+        let nested = nested_locked("rlang", NESTED_SHA, Some("pkgs/rlang"));
+        let root = nested_locked("rlang", NESTED_SHA, None);
+        let pkg_dir = library.path().join("rlang");
+
+        assert!(!is_installed(&nested, library.path()));
+        assert!(is_installed(&root, library.path()));
+
+        let provenance = NestedProvenance::from_locked(&nested).unwrap().unwrap();
+        nested_source::write_marker(&pkg_dir, &provenance).unwrap();
+
+        assert!(is_installed(&nested, library.path()));
+        assert!(!is_installed(&root, library.path()));
+        assert!(!is_installed(
+            &nested_locked("rlang", NESTED_OTHER_SHA, Some("pkgs/rlang")),
+            library.path()
+        ));
+        assert!(!is_installed(
+            &nested_locked("rlang", NESTED_SHA, Some("other/rlang")),
+            library.path()
+        ));
+
+        nested_source::clear_marker(&pkg_dir).unwrap();
+        assert!(is_installed(&root, library.path()));
+
+        let mut version_mismatch = nested;
+        version_mismatch.version = "1.1.7".into();
+        nested_source::write_marker(
+            &pkg_dir,
+            &NestedProvenance::from_locked(&version_mismatch)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!is_installed(&version_mismatch, library.path()));
+    }
+
+    #[test]
+    fn validate_lock_identity_rejects_inconsistent_nested_entries() {
+        let make = |pkg: LockedPackage| Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".into(),
+                bioc_version: None,
+            },
+            packages: vec![
+                locked_pkg(
+                    "jsonlite",
+                    "1.8.8",
+                    "https://cran.r-project.org/src/contrib/jsonlite_1.8.8.tar.gz",
+                ),
+                pkg,
+            ],
+        };
+        assert!(validate_lock_identity(&make(nested_locked(
+            "rlang",
+            NESTED_SHA,
+            Some("pkgs/rlang")
+        )))
+        .is_ok());
+        assert!(validate_lock_identity(&make(nested_locked("rlang", NESTED_SHA, None))).is_ok());
+
+        let mut bad_checksum = nested_locked("rlang", NESTED_SHA, Some("pkgs/rlang"));
+        bad_checksum.checksum = Some("sha256:abc".into());
+        assert!(validate_lock_identity(&make(bad_checksum)).is_err());
+
+        let mut bad_url = nested_locked("rlang", NESTED_SHA, Some("pkgs/rlang"));
+        bad_url.url = Some(format!(
+            "https://codeload.github.com/o/r/tar.gz/{NESTED_SHA}"
+        ));
+        assert!(validate_lock_identity(&make(bad_url)).is_err());
+
+        let mut bad_path = nested_locked("rlang", NESTED_SHA, Some("../escape"));
+        bad_path.subdirectory = Some("../escape".into());
+        assert!(validate_lock_identity(&make(bad_path)).is_err());
+
+        let mut bad_source = nested_locked("rlang", NESTED_SHA, Some("pkgs/rlang"));
+        bad_source.source = PackageSource::Cran;
+        assert!(validate_lock_identity(&make(bad_source)).is_err());
+    }
+
+    #[test]
+    fn is_installed_rejects_an_invalid_nested_lock_entry() {
+        let library = tempfile::TempDir::new().unwrap();
+        fake_installed_pkg(library.path(), "rlang", "1.1.6");
+        let mut broken = nested_locked("rlang", NESTED_SHA, Some("pkgs/rlang"));
+        broken.checksum = Some("sha256:abc".into());
+        assert!(!is_installed(&broken, library.path()));
+    }
+
+    #[tokio::test]
+    async fn invalid_nested_lock_is_side_effect_free() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let project = Project {
+            root: root.clone(),
+            manifest: uvr_core::manifest::Manifest::new("t", None),
+            manifest_source: uvr_core::project::ManifestSource::Toml,
+        };
+        let mut broken = nested_locked("rlang", NESTED_SHA, Some("pkgs/rlang"));
+        broken.checksum = Some("sha256:abc".into());
+        project
+            .save_lockfile(&Lockfile {
+                r: RVersionPin {
+                    version: "4.4.2".into(),
+                    bioc_version: None,
+                },
+                packages: vec![broken],
+            })
+            .unwrap();
+        let external_library = temp.path().join("external-library");
+
+        let result = run_inner(&project, false, false, 1, Some(&external_library), None).await;
+        assert!(result.is_err());
+        assert!(!external_library.exists());
+        assert!(!root.join(".Rprofile").exists());
+        assert!(!root.join(".vscode").exists());
+        assert!(!root.join(".uvr").exists());
     }
 }
