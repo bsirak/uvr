@@ -78,14 +78,14 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 |--------------------------------|-----|------|-----|-----|-----|------|
 | Declarative manifest           | Y   | Y†   | Y†  | Y   | -   | Y    |
 | Lockfile                       | Y   | Y    | Y   | Y   | -   | Y    |
-| R version management           | Y   | -    | -   | -   | Y   | Y    |
-| Run scripts in isolated env    | Y   | -    | -   | -   | -   | Y    |
+| R version management           | Y   | -    | -   | Y   | Y   | Y    |
+| Run scripts in isolated env    | Y   | -    | -   | Y   | -   | Y    |
 | CRAN packages                  | Y   | Y    | Y   | Y   | -   | Y*   |
 | Bioconductor packages          | Y   | Y    | Y   | Y   | -   | Y*   |
 | GitHub packages                | Y   | Y    | Y   | Y   | -   | -    |
-| Pre-built binaries (P3M)       | Y   | -    | Y   | -   | -   | -    |
-| System dep detection (Linux)   | Y   | -    | Y   | -   | -   | Y    |
-| CI mode (`--frozen`)           | Y   | Y    | -   | -   | -   | Y    |
+| Pre-built binaries (P3M)       | Y   | -    | Y   | Y   | -   | -    |
+| System dep detection (Linux)   | Y   | -    | Y   | Y   | -   | Y    |
+| CI mode (`--frozen`)           | Y   | Y    | -   | Y   | -   | Y    |
 | No admin rights required       | Y   | Y    | Y   | Y   | -** | Y    |
 | Standalone CLI (no R required) | Y   | -    | -   | Y   | Y   | Y    |
 | Windows support                | Y   | Y    | Y   | Y   | Y   | Y    |
