@@ -7,6 +7,31 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **`--install-system-deps` now runs the setup commands the sysreqs rules
+  carry**, so it works on distros where the packages do not exist until a
+  repository is enabled.
+  63 of the 131 vendored rule files have a `pre_install` and 2 have a
+  `post_install`, and uvr dropped all of them: on Rocky 9 it tried to
+  install `gdal3.4-devel` from repos that were never enabled, and `rJava`
+  never got its `R CMD javareconf`.
+  `pre_install` now runs before the batched package install and
+  `post_install` after, both only when something is actually missing, so a
+  fully provisioned machine does not re-enable EPEL on every sync.
+  Nothing runs without `--install-system-deps` / `UVR_INSTALL_SYSREQS=1`.
+
+- **The consent block says where each root command comes from and what it
+  does.**
+  These are shell strings run as root, and two of them are worth reading
+  before approving: they arrive either from uvr's vendored
+  `r-system-requirements` snapshot or from Posit's API fetched during that
+  sync, and some of them fetch and execute remote code, install from a
+  URL, disable signature checking, or add a third-party repository.
+  Each command is now listed with both, on stderr alongside the prompt and
+  unconditionally, so redirecting stdout to a build log cannot separate
+  the consent from what it covers.
+  The block also states that an unannotated command is one uvr matched no
+  pattern in rather than one it vetted.
+
 ## v0.4.6 (2026-08-10)
 
 Standalone scripts land: a `.R` file can now declare its own dependencies

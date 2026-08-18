@@ -260,9 +260,206 @@ struct PpmRequirement {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct PpmCommand {
+    #[serde(default)]
+    command: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct PpmRequirementDetail {
     #[serde(default)]
     packages: Vec<String>,
+    #[serde(default)]
+    pre_install: Vec<PpmCommand>,
+    #[serde(default)]
+    post_install: Vec<PpmCommand>,
+}
+
+/// One package's entry in the batched sysreqs index: its distro packages
+/// plus any setup commands the API attaches to them (e.g. enabling EPEL
+/// before a `dnf install`, or `R CMD javareconf` after one).
+#[derive(Debug, Default)]
+struct SysReqIndexEntry {
+    packages: Vec<SysReq>,
+    pre_install: Vec<String>,
+    post_install: Vec<String>,
+}
+
+/// Where a setup command uvr is about to run as root came from.
+///
+/// The two provenances have genuinely different trust stories, and until
+/// now `SysReqsCheck` funnelled both into the same `Vec<String>` so the
+/// consent block could not tell a user which was which:
+///
+/// - `Vendored` is a compile-time constant out of the
+///   `vendor/r-system-requirements` snapshot in this repo. It changes only
+///   when someone bumps the snapshot in a reviewed commit.
+/// - `PositApi` was fetched over the network during *this* sync. On any
+///   API-covered distro — Ubuntu and the RHEL family, i.e. most users —
+///   that is where a meaningful share of what runs as root comes from.
+///
+/// `Both` is the common case in practice rather than a curiosity: the API
+/// and the snapshot are two views of the same upstream rule set, so a
+/// command usually appears identically in both. That makes the label a
+/// drift detector — a command tagged with only one source is one the other
+/// source does not carry, which is exactly the state worth noticing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSource {
+    /// From the audited `vendor/r-system-requirements` snapshot.
+    Vendored,
+    /// From the Posit sysreqs API response fetched during this sync.
+    PositApi,
+    /// Carried identically by both.
+    Both,
+}
+
+impl CommandSource {
+    /// Fold a second sighting of the same command into this one.
+    fn merge(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            Self::Both
+        }
+    }
+
+    /// Human-readable provenance for the consent block.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Vendored => "uvr's vendored rules",
+            Self::PositApi => "Posit's sysreqs API, fetched this sync",
+            Self::Both => "uvr's vendored rules and Posit's sysreqs API",
+        }
+    }
+}
+
+/// What a setup command does that a user approving root execution should
+/// see stated outright, rather than having to read the shell string for.
+///
+/// This is a *behaviour* axis, deliberately independent of
+/// [`CommandSource`]. The two answer different questions, and only this one
+/// is what the user is really consenting to: `curl … https://sh.rustup.rs |
+/// sh` and `dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/…`
+/// are both vendored, and "vendored" means a human reviewed the *rule* —
+/// not that they vouched for what the rule does at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEffect {
+    /// Downloads code from the network and executes it (`curl … | sh`).
+    RemoteScript,
+    /// Installs a package straight from a URL rather than from a
+    /// configured, signed repository.
+    RemotePackage,
+    /// Installs with package signature verification switched off.
+    NoGpgCheck,
+    /// Adds or enables a repository, changing what every later install on
+    /// this machine — not just this one — will trust.
+    AddsRepository,
+}
+
+impl CommandEffect {
+    /// Phrasing for the consent block, as a verb phrase about the command.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::RemoteScript => "downloads and executes a script from the network",
+            Self::RemotePackage => "installs a package directly from a URL",
+            Self::NoGpgCheck => "disables package signature verification",
+            Self::AddsRepository => "adds a third-party repository to this system",
+        }
+    }
+}
+
+/// A setup command, with everything the consent block needs to describe it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupCommand {
+    /// The shell string, verbatim, exactly as it will be passed to `sh -c`.
+    pub command: String,
+    /// Which catalog(s) it came from.
+    pub source: CommandSource,
+}
+
+impl SetupCommand {
+    pub fn new(command: impl Into<String>, source: CommandSource) -> Self {
+        Self {
+            command: command.into(),
+            source,
+        }
+    }
+
+    /// Classify what this command does, for the consent block.
+    ///
+    /// Substring matching over the shell string, and knowingly so: these
+    /// are 34 hand-written commands from one upstream catalog, not
+    /// arbitrary input, and the alternative (parsing shell) buys precision
+    /// this does not need. It is biased toward over-reporting — a
+    /// false-positive note costs a user one line of reading, a
+    /// false-negative costs them the disclosure they were owed.
+    ///
+    /// The corollary is the reason `run_rule_commands` prints the raw
+    /// command too, and the reason the block says so: an *unannotated*
+    /// command is one uvr recognised no pattern in, which is not the same
+    /// as one that is safe. Do not let this list grow into something the
+    /// UI presents as exhaustive.
+    pub fn effects(&self) -> Vec<CommandEffect> {
+        let cmd = &self.command;
+        let mut effects = Vec::new();
+        let fetches_remote = cmd.contains("http://") || cmd.contains("https://");
+
+        // `curl`/`wget` whose output reaches a shell, whether by pipe
+        // (`curl … | sh`) or by substitution (`sh -c "$(curl …)"`).
+        if fetches_remote
+            && (cmd.contains("curl") || cmd.contains("wget"))
+            && (cmd.contains("| sh") || cmd.contains("|sh") || cmd.contains("| bash"))
+        {
+            effects.push(CommandEffect::RemoteScript);
+        }
+        // A URL as the argument of an install, rather than a package name
+        // resolved out of a configured repo. `add-apt-repository` and
+        // `zypper addrepo` also carry URLs but are repo additions, covered
+        // below; excluding them keeps each command's notes to what it does.
+        if fetches_remote
+            && !effects.contains(&CommandEffect::RemoteScript)
+            && (cmd.contains("install") || cmd.contains(" -o "))
+            && !cmd.contains("add-apt-repository")
+            && !cmd.contains("addrepo")
+        {
+            effects.push(CommandEffect::RemotePackage);
+        }
+        if cmd.contains("--nogpgcheck")
+            || cmd.contains("--allow-unauthenticated")
+            || cmd.contains("--allow-untrusted")
+        {
+            effects.push(CommandEffect::NoGpgCheck);
+        }
+        // Repository additions, including the ones that arrive as a
+        // `*-release` package (`epel-release`, `rpmfusion-*-release`) —
+        // installing one of those is how EPEL gets enabled, so calling it
+        // only a package install would understate it.
+        if cmd.contains("add-apt-repository")
+            || cmd.contains("addrepo")
+            || cmd.contains("config-manager")
+            || cmd.contains("subscription-manager")
+            || cmd.contains("-release")
+            || cmd.contains("--repository=")
+        {
+            effects.push(CommandEffect::AddsRepository);
+        }
+        effects
+    }
+}
+
+/// Append `command` to `list`, deduplicated, merging provenance when the
+/// same command arrives from both catalogs.
+///
+/// Dedup is by command string alone: two identical strings are one
+/// execution, so collapsing them and widening the source to `Both` is the
+/// accurate description. Keeping them separate would run EPEL enablement
+/// twice and claim two different provenances for one action.
+fn push_setup_command(list: &mut Vec<SetupCommand>, command: &str, source: CommandSource) {
+    if let Some(existing) = list.iter_mut().find(|c| c.command == command) {
+        existing.source = existing.source.merge(source);
+        return;
+    }
+    list.push(SetupCommand::new(command, source));
 }
 
 /// Index a batched (`all=true`) sysreqs response by R package name.
@@ -277,8 +474,8 @@ struct PpmRequirementDetail {
 /// `LookupFailed`; keep that.
 fn parse_sysreqs_index(
     body: &str,
-) -> std::result::Result<HashMap<String, Vec<SysReq>>, serde_json::Error> {
-    let mut index: HashMap<String, Vec<SysReq>> = HashMap::new();
+) -> std::result::Result<HashMap<String, SysReqIndexEntry>, serde_json::Error> {
+    let mut index: HashMap<String, SysReqIndexEntry> = HashMap::new();
     let response: PpmSysreqsResponse = serde_json::from_str(body)?;
     for req in response.requirements {
         if req.name.is_empty() {
@@ -287,7 +484,17 @@ fn parse_sysreqs_index(
         let entry = index.entry(req.name).or_default();
         for pkg in req.requirements.packages {
             if !pkg.is_empty() {
-                entry.push(SysReq { package: pkg });
+                entry.packages.push(SysReq { package: pkg });
+            }
+        }
+        for c in req.requirements.pre_install {
+            if !c.command.is_empty() && !entry.pre_install.contains(&c.command) {
+                entry.pre_install.push(c.command);
+            }
+        }
+        for c in req.requirements.post_install {
+            if !c.command.is_empty() && !entry.post_install.contains(&c.command) {
+                entry.post_install.push(c.command);
             }
         }
     }
@@ -305,7 +512,7 @@ fn is_unsupported_system_body(body: &str) -> bool {
 
 /// Outcome of the one-per-sync batched sysreqs fetch.
 enum SysReqIndex {
-    Supported(HashMap<String, Vec<SysReq>>),
+    Supported(HashMap<String, SysReqIndexEntry>),
     UnsupportedDistro,
     LookupFailed,
 }
@@ -426,6 +633,13 @@ pub struct SysReqsCheck {
     /// requirement: not missing, not degraded, not skipped. Silence there is
     /// precisely the false confidence this subsystem exists to prevent.
     pub local_unresolved: usize,
+    /// Deduplicated setup commands for the rules that produced `missing`,
+    /// each tagged with the catalog it came from so the consent block can
+    /// disclose which half of the plan was fetched over the network.
+    pub pre_install: Vec<SetupCommand>,
+    /// Deduplicated commands to run after the package install, tagged the
+    /// same way.
+    pub post_install: Vec<SetupCommand>,
 }
 
 /// R package to check sysreqs for.
@@ -512,7 +726,7 @@ pub async fn check_system_deps(
 fn apply_index(
     out: &mut SysReqsCheck,
     packages: &[PackageSysReqQuery],
-    index: Option<&HashMap<String, Vec<SysReq>>>,
+    index: Option<&HashMap<String, SysReqIndexEntry>>,
     distro: &str,
 ) {
     for pkg in packages {
@@ -522,13 +736,27 @@ fn apply_index(
             check_pkg_local(out, pkg, distro);
             continue;
         };
-        let Some(resolved) = index.get(&pkg.name) else {
+        let Some(entry) = index.get(&pkg.name) else {
             // Absent from the index means the package declares no system
             // requirements, which is the common case.
             continue;
         };
-        let missing = filter_missing(resolved);
+        let missing = filter_missing(&entry.packages);
         if !missing.is_empty() {
+            // Same rule as the local path: setup commands only matter when
+            // something is actually missing — otherwise every sync on a
+            // Rocky box would re-enable EPEL.
+            //
+            // Dedup keeps the first occurrence across packages, which assumes
+            // rule commands are order-independent across rules — see the
+            // ordering note on `sysreqs_rules::resolve_local` for the one
+            // known (EOL-Ubuntu-only) case where that assumption bites.
+            for cmd in &entry.pre_install {
+                push_setup_command(&mut out.pre_install, cmd, CommandSource::PositApi);
+            }
+            for cmd in &entry.post_install {
+                push_setup_command(&mut out.post_install, cmd, CommandSource::PositApi);
+            }
             out.missing
                 .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
         }
@@ -544,7 +772,9 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
     let Some(sys_req_text) = pkg.system_requirements.as_deref() else {
         return;
     };
-    let resolved: Vec<SysReq> = sysreqs_rules::resolve_local(sys_req_text, distribution, version)
+    let local = sysreqs_rules::resolve_local(sys_req_text, distribution, version);
+    let resolved: Vec<SysReq> = local
+        .packages
         .into_iter()
         .map(|package| SysReq { package })
         .collect();
@@ -562,6 +792,14 @@ fn check_pkg_local(out: &mut SysReqsCheck, pkg: &PackageSysReqQuery, distro: &st
     out.local_resolved += 1;
     let missing = filter_missing(&resolved);
     if !missing.is_empty() {
+        // Setup commands only matter when something is actually missing —
+        // otherwise every sync on a Rocky box would re-enable EPEL.
+        for cmd in &local.pre_install {
+            push_setup_command(&mut out.pre_install, cmd, CommandSource::Vendored);
+        }
+        for cmd in &local.post_install {
+            push_setup_command(&mut out.post_install, cmd, CommandSource::Vendored);
+        }
         out.missing
             .insert(pkg.name.clone(), missing.into_iter().cloned().collect());
     }
@@ -709,7 +947,7 @@ mod tests {
         let (distribution, release) = normalize_distro("ol", "8.10");
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", &distribution, &release);
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-devel"),
+            pkgs.packages.iter().any(|p| p == "libxml2-devel"),
             "expected libxml2-devel for ol-8.10, got {pkgs:?}"
         );
     }
@@ -727,7 +965,7 @@ mod tests {
         );
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", "centos", "9");
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-devel"),
+            pkgs.packages.iter().any(|p| p == "libxml2-devel"),
             "expected the version-less centos rules to still resolve, got {pkgs:?}"
         );
     }
@@ -764,12 +1002,12 @@ mod tests {
         let (distribution, release) = normalize_distro("rhel", "8.10");
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.6.3)", &distribution, &release);
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-devel"),
+            pkgs.packages.iter().any(|p| p == "libxml2-devel"),
             "expected libxml2-devel for rhel-8.10, got {pkgs:?}"
         );
         let gdal = sysreqs_rules::resolve_local("GDAL (>= 2.2.3)", &distribution, &release);
         assert!(
-            gdal.iter().any(|p| p == "gdal-devel"),
+            gdal.packages.iter().any(|p| p == "gdal-devel"),
             "expected gdal-devel for rhel-8.10, got {gdal:?}"
         );
     }
@@ -801,12 +1039,15 @@ mod tests {
         // trade a spurious warning for wrong package names.
         assert!(
             sysreqs_rules::resolve_local("leptonica", "rockylinux", "8")
+                .packages
                 .iter()
                 .any(|p| p == "leptonica-devel"),
             "rockylinux 8 carries leptonica-devel"
         );
         assert!(
-            sysreqs_rules::resolve_local("leptonica", "redhat", "8").is_empty(),
+            sysreqs_rules::resolve_local("leptonica", "redhat", "8")
+                .packages
+                .is_empty(),
             "redhat 8 does not — aliasing the local lookup would lose it"
         );
         // Both halves of the libarchive divergence, so the test actually
@@ -815,12 +1056,13 @@ mod tests {
         // configure with nothing pointing at the cause.
         assert!(
             sysreqs_rules::resolve_local("libarchive", "centos", "8")
+                .packages
                 .iter()
                 .any(|p| p == "libarchive-devel"),
             "centos 8 wants the -devel package"
         );
         assert_eq!(
-            sysreqs_rules::resolve_local("libarchive", "redhat", "8"),
+            sysreqs_rules::resolve_local("libarchive", "redhat", "8").packages,
             vec!["libarchive".to_string()],
             "redhat 8 names the runtime package, not the headers"
         );
@@ -916,7 +1158,7 @@ mod tests {
         // apk-compatible package name. This is the invariant issue #30 needs.
         let pkgs = sysreqs_rules::resolve_local("libxml2 (>= 2.9.0)", "alpine", "3.21");
         assert!(
-            pkgs.iter().any(|p| p == "libxml2-dev"),
+            pkgs.packages.iter().any(|p| p == "libxml2-dev"),
             "expected libxml2-dev in fallback output, got {pkgs:?}"
         );
     }
@@ -1002,9 +1244,12 @@ mod tests {
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
-            vec![SysReq {
-                package: "libcurl4-openssl-dev".to_string(),
-            }],
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "libcurl4-openssl-dev".to_string(),
+                }],
+                ..Default::default()
+            },
         );
         let mut out = SysReqsCheck::default();
         let packages = vec![PackageSysReqQuery {
@@ -1035,9 +1280,12 @@ mod tests {
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
-            vec![SysReq {
-                package: "libcurl4-openssl-dev".to_string(),
-            }],
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "libcurl4-openssl-dev".to_string(),
+                }],
+                ..Default::default()
+            },
         );
         let mut out = SysReqsCheck::default();
         let packages = vec![PackageSysReqQuery {
@@ -1066,9 +1314,12 @@ mod tests {
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
-            vec![SysReq {
-                package: "libcurl4-openssl-dev".to_string(),
-            }],
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "libcurl4-openssl-dev".to_string(),
+                }],
+                ..Default::default()
+            },
         );
         let mut out = SysReqsCheck::default();
         let packages = vec![
@@ -1102,9 +1353,12 @@ mod tests {
         let mut index = HashMap::new();
         index.insert(
             "curl".to_string(),
-            vec![SysReq {
-                package: "libcurl4-openssl-dev".to_string(),
-            }],
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "libcurl4-openssl-dev".to_string(),
+                }],
+                ..Default::default()
+            },
         );
         let mut out = SysReqsCheck::default();
         let packages = vec![
@@ -1164,7 +1418,11 @@ mod tests {
         ]}"#;
         let index = parse_sysreqs_index(body).unwrap();
         assert_eq!(index.len(), 2);
-        let curl: Vec<&str> = index["curl"].iter().map(|r| r.package.as_str()).collect();
+        let curl: Vec<&str> = index["curl"]
+            .packages
+            .iter()
+            .map(|r| r.package.as_str())
+            .collect();
         assert_eq!(curl, vec!["libcurl4-openssl-dev", "libssl-dev"]);
     }
 
@@ -1183,8 +1441,311 @@ mod tests {
         let body =
             r#"{"requirements":[{"name":"x","requirements":{"packages":["","libssl-dev"]}}]}"#;
         let index = parse_sysreqs_index(body).unwrap();
-        let x: Vec<&str> = index["x"].iter().map(|r| r.package.as_str()).collect();
+        let x: Vec<&str> = index["x"]
+            .packages
+            .iter()
+            .map(|r| r.package.as_str())
+            .collect();
         assert_eq!(x, vec!["libssl-dev"]);
+    }
+
+    #[test]
+    fn batched_index_carries_setup_commands() {
+        // Shape returned by the API for `sf` on rockylinux 9.
+        let body = r#"{"requirements":[
+            {"name":"sf","requirements":{
+                "packages":["gdal3.4-devel"],
+                "pre_install":[{"command":"dnf install -y epel-release"}]
+            }},
+            {"name":"rJava","requirements":{
+                "packages":["default-jdk"],
+                "post_install":[{"command":"R CMD javareconf"}]
+            }}
+        ]}"#;
+        let index = parse_sysreqs_index(body).unwrap();
+        assert_eq!(index["sf"].pre_install, vec!["dnf install -y epel-release"]);
+        assert_eq!(index["rJava"].post_install, vec!["R CMD javareconf"]);
+        assert!(index["sf"].post_install.is_empty());
+    }
+
+    #[test]
+    fn api_setup_commands_are_collected_only_when_something_is_missing() {
+        // Mirrors the local-path rule: an index entry with pre_install
+        // commands must not leak them into `out.pre_install` unless
+        // `filter_missing` actually reports something missing for that
+        // package — otherwise every sync on a covered distro would
+        // re-enable EPEL regardless of what's already installed.
+        let mut index = HashMap::new();
+        index.insert(
+            "sf".to_string(),
+            SysReqIndexEntry {
+                packages: vec![],
+                pre_install: vec!["dnf install -y epel-release".to_string()],
+                post_install: vec![],
+            },
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![PackageSysReqQuery {
+            name: "sf".to_string(),
+            system_requirements: None,
+            bioc: false,
+        }];
+        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        assert!(
+            out.pre_install.is_empty(),
+            "sf has no packages, so nothing can be missing, so no setup command should be collected"
+        );
+    }
+
+    #[test]
+    fn api_setup_commands_are_deduplicated_across_packages() {
+        // The real rockylinux-9 shape: every geospatial package's index entry
+        // repeats `dnf install -y epel-release`. `apply_index` merges the
+        // entries of all packages in one sync, so without its `contains`
+        // guard the user would be shown — and asked to consent to — the same
+        // root command once per package, and uvr would run it N times.
+        //
+        // Both packages must genuinely be missing something, since setup
+        // commands are only collected when `filter_missing` reports a gap.
+        if which::which("dpkg").is_err()
+            && which::which("rpm").is_err()
+            && which::which("apk").is_err()
+        {
+            // Without dpkg/rpm/apk (macOS/Windows dev boxes) `filter_missing`
+            // reports nothing missing, so the collection path under test
+            // never runs and the assertions below would be vacuous.
+            return;
+        }
+        let entry = |pkg: &str| SysReqIndexEntry {
+            packages: vec![SysReq {
+                package: pkg.to_string(),
+            }],
+            pre_install: vec!["dnf install -y epel-release".to_string()],
+            post_install: vec!["R CMD javareconf".to_string()],
+        };
+        let mut index = HashMap::new();
+        index.insert(
+            "sf".to_string(),
+            entry("uvr-test-absent-gdal-devel-4e1d9f2a"),
+        );
+        index.insert(
+            "terra".to_string(),
+            entry("uvr-test-absent-geos-devel-4e1d9f2a"),
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![
+            PackageSysReqQuery {
+                name: "sf".to_string(),
+                system_requirements: None,
+                bioc: false,
+            },
+            PackageSysReqQuery {
+                name: "terra".to_string(),
+                system_requirements: None,
+                bioc: false,
+            },
+        ];
+        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        assert_eq!(
+            out.missing.len(),
+            2,
+            "precondition: both packages must report a missing system package, \
+             otherwise no setup command is collected at all"
+        );
+        assert_eq!(
+            out.pre_install,
+            vec![SetupCommand::new(
+                "dnf install -y epel-release",
+                CommandSource::PositApi
+            )],
+            "the shared pre_install command must appear exactly once"
+        );
+        assert_eq!(
+            out.post_install,
+            vec![SetupCommand::new(
+                "R CMD javareconf",
+                CommandSource::PositApi
+            )],
+            "the shared post_install command must appear exactly once"
+        );
+    }
+
+    #[test]
+    fn a_command_carried_by_both_catalogs_is_labelled_as_such() {
+        // The provenance tag has to survive dedup, or the label is worse
+        // than none: the two catalogs are two views of the same upstream
+        // rules and usually agree, so keeping only whichever source was
+        // seen first would tell most users "vendored" about commands the
+        // API also sent — reassurance that is not true of the second half.
+        //
+        // Reached the way a real sync reaches it: `apply_index` sends a
+        // Bioc package to the vendored rules (#202) and a CRAN one to the
+        // index, so a mixed sync collects from both catalogs at once.
+        if which::which("dpkg").is_err()
+            && which::which("rpm").is_err()
+            && which::which("apk").is_err()
+        {
+            // No package manager: `filter_missing` reports nothing missing,
+            // so no setup command is collected and this would pass vacuously.
+            return;
+        }
+        let mut index = HashMap::new();
+        index.insert(
+            "sf".to_string(),
+            SysReqIndexEntry {
+                packages: vec![SysReq {
+                    package: "uvr-test-absent-gdal-devel-7c3b1e50".to_string(),
+                }],
+                // The command the rockylinux-9 GDAL rule also carries.
+                pre_install: vec!["dnf install -y dnf-plugins-core".to_string()],
+                post_install: vec![],
+            },
+        );
+        let mut out = SysReqsCheck::default();
+        let packages = vec![
+            PackageSysReqQuery {
+                name: "sf".to_string(),
+                system_requirements: None,
+                bioc: false,
+            },
+            PackageSysReqQuery {
+                name: "SomeBiocPkg".to_string(),
+                system_requirements: Some("GDAL (>= 2.0.1)".to_string()),
+                bioc: true,
+            },
+        ];
+        apply_index(&mut out, &packages, Some(&index), "rockylinux-9");
+        let shared = out
+            .pre_install
+            .iter()
+            .find(|c| c.command == "dnf install -y dnf-plugins-core")
+            .expect("both catalogs carry this command");
+        assert_eq!(
+            shared.source,
+            CommandSource::Both,
+            "a command both catalogs carry must not be attributed to only one"
+        );
+        assert_eq!(
+            out.pre_install
+                .iter()
+                .filter(|c| c.command == "dnf install -y dnf-plugins-core")
+                .count(),
+            1,
+            "merging provenance must not duplicate the command itself"
+        );
+        // The vendored rule's other command has no API counterpart here, so
+        // it stays single-sourced — that asymmetry is the drift signal the
+        // label exists to make visible.
+        assert_eq!(
+            out.pre_install
+                .iter()
+                .find(|c| c.command == "dnf config-manager --set-enabled crb")
+                .map(|c| c.source),
+            Some(CommandSource::Vendored)
+        );
+    }
+
+    #[test]
+    fn the_riskiest_vendored_commands_are_annotated() {
+        // @gdevenyi's point on #221: provenance alone points at the wrong
+        // axis. Every command below is *vendored* — a human reviewed the
+        // rule, which says nothing about what the rule does at runtime — so
+        // labelling them only "from uvr's vendored rules" would read as
+        // reassurance about the four things most worth seeing before
+        // approving root execution. All four are live in the snapshot on
+        // main today; this PR is what starts running them.
+        let vendored = |cmd: &str| SetupCommand::new(cmd, CommandSource::Vendored);
+
+        // rust.json: fetches a script over the network and pipes it to a
+        // root shell.
+        let effects = vendored(
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path -y",
+        )
+        .effects();
+        assert!(
+            effects.contains(&CommandEffect::RemoteScript),
+            "{effects:?}"
+        );
+
+        // chrome.json: downloads a vendor package, then installs the file.
+        assert!(
+            vendored(
+                "[ $(which google-chrome) ] || curl -fsSL -o /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+            )
+            .effects()
+            .contains(&CommandEffect::RemotePackage)
+        );
+
+        // libavfilter.json: installs with signature checking off, from a URL.
+        let effects = vendored(
+            "dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-$(rpm -E %rhel).noarch.rpm",
+        )
+        .effects();
+        assert!(effects.contains(&CommandEffect::NoGpgCheck), "{effects:?}");
+        assert!(
+            effects.contains(&CommandEffect::RemotePackage),
+            "both notes apply and both are worth printing: {effects:?}"
+        );
+
+        // gdal.json and friends: changes what this machine trusts from here
+        // on, not just for this install.
+        assert!(vendored("add-apt-repository -y ppa:ubuntugis/ppa")
+            .effects()
+            .contains(&CommandEffect::AddsRepository));
+        // Enabling EPEL arrives as a `*-release` package install; calling
+        // that a plain package install would understate what it does.
+        assert!(vendored("dnf install -y epel-release")
+            .effects()
+            .contains(&CommandEffect::AddsRepository));
+        assert!(vendored("dnf config-manager --set-enabled crb")
+            .effects()
+            .contains(&CommandEffect::AddsRepository));
+    }
+
+    #[test]
+    fn an_ordinary_command_gets_no_note() {
+        // The notes must stay a signal. If `R CMD javareconf` or a plain
+        // index refresh picked one up, the annotated lines would stop
+        // standing out — and the block's closing line is what covers the
+        // other direction, that an unannotated command is one uvr matched
+        // no pattern in rather than one it vetted.
+        for cmd in [
+            "R CMD javareconf",
+            "apt-get update",
+            "apt-get install -y software-properties-common",
+            "yum install -y which",
+        ] {
+            assert!(
+                SetupCommand::new(cmd, CommandSource::Vendored)
+                    .effects()
+                    .is_empty(),
+                "{cmd} should not be annotated"
+            );
+        }
+    }
+
+    #[test]
+    fn every_vendored_setup_command_is_classifiable_without_panicking() {
+        // Blanket sweep over the whole snapshot: `effects` is substring
+        // matching over shell strings, and the point of running it across
+        // every rule the table carries is to catch the day a snapshot bump
+        // introduces a command shape that trips it. Also pins the
+        // over-reporting bias — any command touching a URL must say
+        // *something*, since a network fetch as root is never a detail to
+        // leave to the user to spot in the shell string.
+        for rule in sysreqs_rules::RULES {
+            for dep in rule.dependencies.iter() {
+                for cmd in dep.pre_install.iter().chain(dep.post_install.iter()) {
+                    let effects = SetupCommand::new(*cmd, CommandSource::Vendored).effects();
+                    if cmd.contains("http://") || cmd.contains("https://") {
+                        assert!(
+                            !effects.is_empty(),
+                            "a command that reaches the network as root must carry a note: {cmd}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

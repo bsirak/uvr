@@ -1106,10 +1106,33 @@ async fn install_from_lockfile_with_r(
                                 ui::warn(
                                     "--install-system-deps requested, but `sudo` is not on PATH and uvr is not running as root.",
                                 );
+                                // Same shape as the `(false, _)` arm below:
+                                // the package-manager command alone is not a
+                                // working recipe when a rule needs a repo
+                                // enabled first (EPEL, crb), so print the
+                                // setup commands here too rather than handing
+                                // the user a line that fails when pasted.
+                                for cmd in &check.pre_install {
+                                    ui::hint(format!("First run: {}", cmd.command));
+                                }
                                 ui::hint(&install_hint);
+                                for cmd in &check.post_install {
+                                    ui::hint(format!("Then run: {}", cmd.command));
+                                }
                                 ui::hint("Or run uvr as root in this container.");
                             }
                             (true, Some((install_program, install_args))) => {
+                                // Before consent, not after: the prompt below
+                                // names only the package-manager command, but
+                                // answering yes also authorises every
+                                // pre_install/post_install command a rule
+                                // carries. See `print_sysreqs_disclosure` for
+                                // what it prints and why it prints it there.
+                                print_sysreqs_disclosure(
+                                    &check.pre_install,
+                                    &install_cmd_display,
+                                    &check.post_install,
+                                );
                                 if confirm_sysreqs_install(&install_cmd_display)? {
                                     // Refresh the package index first where the
                                     // manager needs it: fresh openSUSE/Arch
@@ -1118,8 +1141,33 @@ async fn install_from_lockfile_with_r(
                                     // found" for packages that exist. Best-effort
                                     // — a failed refresh still lets the install
                                     // try (it may have usable cached lists).
+                                    //
+                                    // Before the rules' own setup, not after:
+                                    // `gdal.json` opens its Ubuntu pre_install
+                                    // with `apt-get install -y
+                                    // software-properties-common`, which needs
+                                    // lists a fresh container doesn't have. The
+                                    // rules re-refresh themselves where their own
+                                    // repo additions require it (that same rule
+                                    // ends with `apt-get update` after the PPA).
                                     run_sysreqs_refresh();
-                                    ui::info(format!("Running: {install_cmd_display}"));
+                                    // Setup next: several rules need a repo
+                                    // enabled (EPEL, crb) before their packages
+                                    // exist. Entries contain shell operators,
+                                    // so they go through `sh -c`. A failed
+                                    // setup step bails: the package install
+                                    // below would fail anyway.
+                                    //
+                                    // No R bin dir, hence no `PATH` override
+                                    // at all: nothing in a `pre_install` rule
+                                    // needs R, and leaving `PATH` alone keeps
+                                    // sudo's `secure_path` in force for these
+                                    // root-run shell strings.
+                                    run_rule_commands(&check.pre_install, "setup", None, true)?;
+                                    // stderr, like the disclosure above: this
+                                    // is the audit trail for what was just
+                                    // consented to, not command output.
+                                    ui::info_err(format!("Running: {install_cmd_display}"));
                                     let mut cmd = std::process::Command::new(&install_program);
                                     cmd.args(&install_args);
                                     if let Some(pm) = uvr_core::sysreqs::PackageManager::detect() {
@@ -1138,6 +1186,18 @@ async fn install_from_lockfile_with_r(
                                             status.code().unwrap_or(-1)
                                         );
                                     }
+                                    // Post-install runs after the packages
+                                    // are already installed, so a failure
+                                    // here (e.g. `R CMD javareconf` still
+                                    // missing something) warns and continues
+                                    // instead of failing an otherwise-
+                                    // successful sync.
+                                    run_rule_commands(
+                                        &check.post_install,
+                                        "post-install",
+                                        r_binary.parent(),
+                                        false,
+                                    )?;
                                     ui::success("System dependencies installed.");
                                 } else {
                                     ui::hint(&install_hint);
@@ -1147,7 +1207,13 @@ async fn install_from_lockfile_with_r(
                                 }
                             }
                             (false, _) => {
+                                for cmd in &check.pre_install {
+                                    ui::hint(format!("First run: {}", cmd.command));
+                                }
                                 ui::hint(&install_hint);
+                                for cmd in &check.post_install {
+                                    ui::hint(format!("Then run: {}", cmd.command));
+                                }
                                 ui::hint(
                                     "Or set --install-system-deps / UVR_INSTALL_SYSREQS=1 to let uvr run that for you.",
                                 );
@@ -1789,6 +1855,170 @@ fn local_check_incomplete(
     pkgs_with_sysreqs: usize,
 ) -> bool {
     check.missing.is_empty() && pkgs_with_sysreqs > 0 && check.local_resolved < pkgs_with_sysreqs
+}
+
+/// Base `PATH` for rule commands that run as root. Mirrors the default
+/// `secure_path` shipped in `/etc/sudoers` on Debian/Ubuntu, Fedora/RHEL
+/// and Alpine, so a rule command sees the same search path it would have
+/// seen under plain `sudo`. Only ever extended with the R bin directory
+/// uvr manages — never with the invoking user's `$PATH`.
+#[cfg(target_os = "linux")]
+const ROOT_SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Run a rule's setup/post-install commands via `sh -c`: entries such as
+/// `rpm -q epel-release || yum install -y https://...` rely on shell
+/// operators, so a direct `Command::new` of the first token would break
+/// them.
+///
+/// Escalates with the same `sudo` rule as `pick_sysreqs_installer`: these
+/// commands enable repos and install RPMs/DEBs, which need root just like
+/// the package install itself. The caller only reaches this function via
+/// the `(true, Some(..))` match arm, where `pick_sysreqs_installer` has
+/// already returned `None` (and short-circuited to the `(true, None)`
+/// arm instead) whenever `sudo` would be needed but isn't on PATH — so
+/// `sudo` is guaranteed to exist here whenever it's needed.
+///
+/// `r_bin_dir` is the directory holding the R binary this sync is using
+/// (`r_binary`'s parent). It is `Some` only for the `post_install`
+/// phase: that is the one phase whose commands need R on `PATH` (`R CMD
+/// javareconf` for rJava). A uvr-managed R install lives under uvr's own
+/// managed directory and is never added to `$PATH`, so that command
+/// failed with exit 127 on every uvr-managed R.
+///
+/// SECURITY — the `PATH` seen by a root shell is built from a fixed,
+/// known-safe base ([`ROOT_SAFE_PATH`]), never from the invoking user's
+/// `$PATH`. Inheriting `$PATH` into `sudo env PATH=…` would defeat
+/// `sudo`'s `secure_path`, which exists precisely to stop a root command
+/// resolving binaries out of an unprivileged user's search path: with
+/// conda or `~/.local/bin` active, `rpm -q epel-release || yum install
+/// -y …` would consult the *user's* `rpm`, and some vendored rules pipe
+/// a downloaded script through the user's `curl`, as root. `pre_install`
+/// therefore passes no `PATH` override at all, leaving `sudo`'s own
+/// `secure_path` in force; `post_install` prepends only the R bin
+/// directory, which uvr itself installed, to the safe base.
+///
+/// `sudo`'s default `env_reset` discards the environment it inherited
+/// and rebuilds one from its own policy (`secure_path`, `env_keep`), so
+/// setting `PATH` on the `sudo` child via `Command::env` would not
+/// reliably survive into the command sudo execs. Hence `sudo env
+/// PATH=<path> sh -c <cmd>` when a `PATH` is needed at all: `env` is the
+/// program sudo execs (resolved via `secure_path`, so it's found
+/// regardless of the sanitised `PATH`), and setting a variable via
+/// `env`'s own argv is not subject to `env_keep`/`env_delete` filtering
+/// the way an inherited variable would be — it reaches `sh`
+/// unconditionally.
+///
+/// `bail_on_failure` is why `pre_install` and `post_install` are no
+/// longer symmetric: a `pre_install` failure (e.g. a repo that didn't
+/// enable) means the package install that follows will fail anyway, so
+/// failing fast with a clear message is correct. `post_install` runs
+/// after the packages are already installed, so a failure there (e.g.
+/// `javareconf` still missing a system lib) must not turn an otherwise-
+/// successful sync into a failed one — it warns, names the command to
+/// re-run, and continues. Do not merge these back into one "just bail"
+/// path; that regresses the exact case this feature exists for (rJava +
+/// `--install-system-deps`).
+#[cfg(target_os = "linux")]
+fn run_rule_commands(
+    cmds: &[uvr_core::sysreqs::SetupCommand],
+    phase: &str,
+    r_bin_dir: Option<&std::path::Path>,
+    bail_on_failure: bool,
+) -> Result<()> {
+    let needs_sudo = !is_effective_root();
+    // Deliberately NOT `std::env::var("PATH")`: see the security note above.
+    let path_env = r_bin_dir.map(|dir| format!("{}:{ROOT_SAFE_PATH}", dir.display()));
+    for cmd in cmds.iter().map(|c| &c.command) {
+        // stderr: this is the audit line for a privileged command, and it
+        // belongs with the disclosure and the prompt that preceded it.
+        ui::info_err(format!("Running: {cmd}"));
+        let status = if needs_sudo {
+            let mut command = std::process::Command::new("sudo");
+            if let Some(path) = &path_env {
+                command.args(["env", &format!("PATH={path}")]);
+            }
+            command.args(["sh", "-c", cmd]).status()
+        } else {
+            let mut command = std::process::Command::new("sh");
+            command.arg("-c").arg(cmd);
+            if let Some(path) = &path_env {
+                command.env("PATH", path);
+            }
+            command.status()
+        }
+        .with_context(|| format!("Failed to spawn: {cmd}"))?;
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            if bail_on_failure {
+                anyhow::bail!("System dependency {phase} failed (exit {code}): {cmd}");
+            }
+            ui::warn(format!(
+                "System dependency {phase} failed (exit {code}): {cmd}"
+            ));
+            ui::hint(format!("Run `{cmd}` manually to finish {phase}."));
+        }
+    }
+    Ok(())
+}
+
+/// Print the full plan before `confirm_sysreqs_install` asks for consent.
+///
+/// Every command is listed with two annotations, because a user approving
+/// root execution is answering two different questions and the block used
+/// to answer neither:
+///
+/// - **source** — a vendored command is a compile-time constant from the
+///   reviewed `vendor/r-system-requirements` snapshot; a `Posit's sysreqs
+///   API` one arrived over the network during this sync. On Ubuntu and the
+///   RHEL family the API answers, so that is most users.
+/// - **note** — what the command actually does. Provenance alone would be
+///   actively misleading here: `curl … https://sh.rustup.rs | sh` and
+///   `dnf install -y --nogpgcheck https://mirrors.rpmfusion.org/…` are
+///   *vendored*, and "vendored" means a human reviewed the rule, not that
+///   they vouched for what it does at runtime.
+///
+/// The closing line says outright that an unannotated command is one uvr
+/// recognised no pattern in rather than one it has cleared, so the notes
+/// are not read as a whitelist. Everything goes to stderr, where
+/// `confirm_sysreqs_install` prompts, so redirecting stdout to a build log
+/// cannot separate the consent from what it covers.
+///
+/// Unconditional: `confirm_sysreqs_install` returns `true` without
+/// prompting on a non-TTY, so printing this only when a prompt will appear
+/// would leave CI runs with no record of what ran as root.
+#[cfg(target_os = "linux")]
+fn print_sysreqs_disclosure(
+    pre_install: &[uvr_core::sysreqs::SetupCommand],
+    install_cmd_display: &str,
+    post_install: &[uvr_core::sysreqs::SetupCommand],
+) {
+    if pre_install.is_empty() && post_install.is_empty() {
+        // Nothing but the package-manager command, which the prompt itself
+        // names in full — a disclosure block would only repeat it.
+        return;
+    }
+    ui::info_err("The following will run as root:");
+    let describe = |cmd: &uvr_core::sysreqs::SetupCommand| {
+        ui::bullet_err(&cmd.command);
+        ui::sub_err(format!("source: {}", cmd.source.label()));
+        let effects = cmd.effects();
+        if !effects.is_empty() {
+            let notes: Vec<&str> = effects.iter().map(|e| e.label()).collect();
+            ui::sub_err(format!("note: {}", notes.join("; ")));
+        }
+    };
+    for cmd in pre_install {
+        describe(cmd);
+    }
+    // uvr builds this one itself from the resolved package names, so it has
+    // no rule provenance to report and needs no note.
+    ui::bullet_err(install_cmd_display);
+    for cmd in post_install {
+        describe(cmd);
+    }
+    ui::note_err(
+        "Commands without a note are ones uvr matched no pattern in, not ones it has vetted.",
+    );
 }
 
 /// Prompt before invoking the system package manager. Same TTY-only
