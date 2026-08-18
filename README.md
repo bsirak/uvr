@@ -57,7 +57,7 @@ Here is how existing tools compare and where the gaps are:
 
 - **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not pin R versions ("renv tracks, but doesn't help with, the version of R used") and relies on `install.packages()` under the hood, which is slow and requires compilation on Linux.
 - **pak** — fast parallel installs and good system dependency detection, but no lockfile and no R version management. A great complement to renv, not a replacement.
-- **rv** — the closest prior art: Rust-based, declarative, fast. It focuses on package resolution. It does not manage R installations, and `rv run` is not yet available.
+- **rv** — the closest prior art: Rust-based, declarative, fast, with P3M binaries, `rv run`, `rv sysdeps`, and `rv sync --locked` for CI. It selects among the R versions already installed on the machine — including ones `rig` put there — but does not install R itself, which is the gap `uvr` closes.
 - **rig** — excellent R version manager. No package management or lockfile. Requires admin rights on Windows.
 - **pixi** — conda-based multi-language environment manager. Supports R via conda-forge, but packages come from conda-forge rather than CRAN/Bioconductor/P3M natively. Language-agnostic by design; not R-first.
 - **rix** — Nix-based, with extreme reproducibility including system-level dependencies. Right tool if you need bit-for-bit reproducibility across machines. Requires Nix; a different philosophy than a fast pragmatic workflow.
@@ -78,14 +78,15 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 |--------------------------------|-----|------|-----|-----|-----|------|
 | Declarative manifest           | Y   | Y†   | Y†  | Y   | -   | Y    |
 | Lockfile                       | Y   | Y    | Y   | Y   | -   | Y    |
-| R version management           | Y   | -    | -   | Y   | Y   | Y    |
+| R version selection / pinning  | Y   | -    | -   | Y   | Y   | Y    |
+| Installs R itself              | Y   | -    | -   | -   | Y   | Y    |
 | Run scripts in isolated env    | Y   | -    | -   | Y   | -   | Y    |
 | CRAN packages                  | Y   | Y    | Y   | Y   | -   | Y*   |
 | Bioconductor packages          | Y   | Y    | Y   | Y   | -   | Y*   |
 | GitHub packages                | Y   | Y    | Y   | Y   | -   | -    |
 | Pre-built binaries (P3M)       | Y   | -    | Y   | Y   | -   | -    |
-| System dep detection (Linux)   | Y   | -    | Y   | Y   | -   | Y    |
-| CI mode (`--frozen`)           | Y   | Y    | -   | Y   | -   | Y    |
+| System dep detection (Linux)   | Y   | -    | Y   | Y‡  | -   | Y    |
+| CI mode (fail on stale lock)   | Y   | Y    | -   | Y   | -   | Y    |
 | No admin rights required       | Y   | Y    | Y   | Y   | -** | Y    |
 | Standalone CLI (no R required) | Y   | -    | -   | Y   | Y   | Y    |
 | Windows support                | Y   | Y    | Y   | Y   | Y   | Y    |
@@ -93,6 +94,7 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 \* pixi installs R packages from conda-forge, not CRAN/Bioconductor directly.
 \** rig requires admin rights on Windows.
 † Via DESCRIPTION-based workflow, not a dedicated manifest format.
+‡ Per `rv sysdeps`' own help, coverage is currently Ubuntu/Debian.
 
 ---
 
