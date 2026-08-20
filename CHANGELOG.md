@@ -21,9 +21,11 @@ Pure tracking section — fixes and small features land here between tags.
   while uvr used binaries — that is not a comparison, and the "142x"
   headline built on it was wrong. The script now uses the
   `__linux__/<codename>` binary path plus an R User-Agent on Linux, and
-  the site shows the verified macOS numbers (uvr 0.27s vs
-  install.packages 11.78s for tidyverse — 44x, not 142x) until a
-  corrected container run lands.
+  the site now shows the corrected container run (cold tier: uvr 10.4s
+  vs install.packages 29.2s for tidyverse — 2.8x, not 142x; warm runs
+  are far faster still). The same fix made the pathological pak and
+  warm-sync numbers from #235/#237 disappear, so those were likely the
+  mirror bug too.
 
 - **`--install-system-deps` now runs the setup commands the sysreqs rules
   carry**, so it works on distros where the packages do not exist until a
