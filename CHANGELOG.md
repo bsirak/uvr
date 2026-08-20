@@ -7,6 +7,24 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Corrected false claims in the docs, flagged by r/rstats.**
+  The README's Rationale said renv installs are "slow and require
+  compilation on Linux" (mirror-dependent, not true with a binary repo
+  like P3M — our own benchmark shows it), said pak has "no lockfile"
+  (`pak::lockfile_create()` exists, and our own feature matrix said Y),
+  and the website's comparison table still had rv's column from before
+  PR #254 (no `rv run`, no sysdeps, no CI mode). All fixed.
+- **The website's benchmark numbers were invalid and are replaced.**
+  `bench.sh` pointed every R tool at P3M's source-only path
+  (`p3m.dev/cran/latest`), so in the Linux container install.packages
+  and pak compiled everything from source (865s / 414s for tidyverse)
+  while uvr used binaries — that is not a comparison, and the "142x"
+  headline built on it was wrong. The script now uses the
+  `__linux__/<codename>` binary path plus an R User-Agent on Linux, and
+  the site shows the verified macOS numbers (uvr 0.27s vs
+  install.packages 11.78s for tidyverse — 44x, not 142x) until a
+  corrected container run lands.
+
 - **`--install-system-deps` now runs the setup commands the sysreqs rules
   carry**, so it works on distros where the packages do not exist until a
   repository is enabled.

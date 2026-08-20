@@ -55,8 +55,8 @@ R has several package management tools — `renv`, `pak`, `rv`, `rig` — each s
 
 Here is how existing tools compare and where the gaps are:
 
-- **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not pin R versions ("renv tracks, but doesn't help with, the version of R used") and relies on `install.packages()` under the hood, which is slow and requires compilation on Linux.
-- **pak** — fast parallel installs and good system dependency detection, but no lockfile and no R version management. A great complement to renv, not a replacement.
+- **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not pin R versions ("renv tracks, but doesn't help with, the version of R used") and it works library-first: the lockfile records what your library already has rather than driving what gets installed. Install speed is a property of your mirror, not of renv — pointed at a binary repo like P3M it is fast (see the benchmarks below).
+- **pak** — fast parallel installs and good system dependency detection. It does have lockfiles (`pak::lockfile_create()` / `pak::lockfile_install()`, aimed at CI), but no R version management, and it is an installer rather than a project workflow — in practice paired with renv, not a replacement for it.
 - **rv** — the closest prior art: Rust-based, declarative, fast, with P3M binaries, `rv run`, `rv sysdeps`, and `rv sync --locked` for CI. It selects among the R versions already installed on the machine — including ones `rig` put there — but does not install R itself, which is the gap `uvr` closes.
 - **rig** — excellent R version manager. No package management or lockfile. Requires admin rights on Windows.
 - **pixi** — conda-based multi-language environment manager. Supports R via conda-forge, but packages come from conda-forge rather than CRAN/Bioconductor/P3M natively. Language-agnostic by design; not R-first.
@@ -66,7 +66,7 @@ Here is how existing tools compare and where the gaps are:
 
 1. **One tool, one config** — no juggling renv + rig + pak. `uvr.toml` declares both the R version and package dependencies.
 2. **Lockfile-first** — `uvr.lock` is the source of truth. `uvr sync` is always reproducible and idempotent.
-3. **Fast by default** — P3M pre-built binaries on macOS and Windows; source fallback only when needed.
+3. **Fast by default** — P3M pre-built binaries on macOS, Windows, and Linux; source fallback only when needed.
 4. **R version management built in** — `uvr r install`, `uvr r use`, `uvr r pin` work the same way `uv python` does, because needing a separate tool for this is friction.
 5. **CI-native** — `uvr sync --frozen` is a first-class command, not an afterthought.
 

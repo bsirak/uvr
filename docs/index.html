@@ -1021,9 +1021,9 @@
         <h2 class="section-title">Install benchmarks</h2>
         <p class="section-desc">
           Parallel downloads, global package cache, no R process for binary installs.
-          Cold install onto a clean machine — empty library, empty caches — in the pinned
-          benchmark container (Linux&nbsp;x86_64, R&nbsp;4.5.3), with P3M binaries available
-          to every tool. Median of 3 runs.
+          Install into an empty project library (index caches warm) on macOS arm64
+          (Apple&nbsp;Silicon, R&nbsp;4.5), with P3M as the CRAN mirror for every tool
+          — binaries for all. Median of 5 runs.
           <strong>First-install comparison:</strong> uvr pre-resolves deps via <code>uvr lock</code> (separate step) and only <code>uvr sync</code> (install) is timed; <code>install.packages</code>/<code>pak</code>/<code>renv</code> resolve + install inline.
           For a like-for-like lockfile-restore comparison, see <code>pak::lockfile_install()</code> and <code>renv::restore()</code>.
         </p>
@@ -1032,36 +1032,36 @@
         <!-- tidyverse -->
         <div class="bench-card">
           <div class="bench-card-title">tidyverse</div>
-          <div class="bench-card-subtitle">100 packages</div>
+          <div class="bench-card-subtitle">99 packages</div>
 
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 0.7%;"></div>
-              <span class="bench-bar-time">6.1s</span>
+              <div class="bench-bar bench-bar-uvr" style="width: 2.3%;"></div>
+              <span class="bench-bar-time">0.27s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 9.2%;"></div>
-              <span class="bench-bar-time">79.8s</span>
+              <div class="bench-bar bench-bar-other" style="width: 7%;"></div>
+              <span class="bench-bar-time">0.82s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 47.8%;"><span class="bench-bar-time">413.7s</span></div>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 68.8%;"><span class="bench-bar-time">8.1s</span></div>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 100%;"><span class="bench-bar-time">865.3s</span></div>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 100%;"><span class="bench-bar-time">11.78s</span></div>
             </div>
           </div>
 
-          <div class="bench-speedup">142x faster than install.packages()</div>
+          <div class="bench-speedup">44x faster than install.packages()</div>
         </div>
         <!-- ggplot2 -->
         <div class="bench-card">
@@ -1071,31 +1071,31 @@
           <div class="bench-row">
             <div class="bench-label bench-label-uvr">uvr</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-uvr" style="width: 4.3%;"></div>
-              <span class="bench-bar-time">4.8s</span>
+              <div class="bench-bar bench-bar-uvr" style="width: 3.7%;"></div>
+              <span class="bench-bar-time">0.21s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">renv</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other" style="width: 14.1%;"></div>
-              <span class="bench-bar-time">15.9s</span>
+              <div class="bench-bar bench-bar-other" style="width: 9.6%;"></div>
+              <span class="bench-bar-time">0.54s</span>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">pak</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 70.6%;"><span class="bench-bar-time">79.5s</span></div>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 100%;"><span class="bench-bar-time">5.62s</span></div>
             </div>
           </div>
           <div class="bench-row">
             <div class="bench-label">install.pkgs</div>
             <div class="bench-bar-track">
-              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 100%;"><span class="bench-bar-time">112.6s</span></div>
+              <div class="bench-bar bench-bar-other bench-bar-inline" style="width: 78.3%;"><span class="bench-bar-time">4.4s</span></div>
             </div>
           </div>
 
-          <div class="bench-speedup">23x faster than install.packages()</div>
+          <div class="bench-speedup">21x faster than install.packages()</div>
         </div>
 
       </div>
@@ -1275,7 +1275,16 @@
               <td><span class="check">&#10003;</span></td>
             </tr>
             <tr>
-              <td>R version management</td>
+              <td>R version selection / pinning</td>
+              <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
+              <td><span class="cross">&mdash;</span></td>
+              <td><span class="cross">&mdash;</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003;</span></td>
+            </tr>
+            <tr>
+              <td>Installs R itself</td>
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="cross">&mdash;</span></td>
@@ -1288,7 +1297,7 @@
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="cross">&mdash;</span></td>
-              <td><span class="cross">&mdash;</span></td>
+              <td><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
             </tr>
@@ -1324,16 +1333,16 @@
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
-              <td><span class="cross">&mdash;</span></td>
+              <td><span class="check-note">&#10003;&Dagger;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
             </tr>
             <tr>
-              <td>CI mode (--frozen)</td>
+              <td>CI mode (fail on stale lock)</td>
               <td class="col-uvr-cell"><span class="check">&#10003;</span></td>
               <td><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
-              <td><span class="cross">&mdash;</span></td>
+              <td><span class="check">&#10003;</span></td>
               <td><span class="cross">&mdash;</span></td>
               <td><span class="check">&#10003;</span></td>
             </tr>
@@ -1367,7 +1376,7 @@
           </tbody>
         </table>
       </div>
-      <p class="table-footnote">* Via conda-forge channel, not native CRAN/Bioconductor integration. &nbsp; &dagger; Via DESCRIPTION-based workflow, not a dedicated manifest format.</p>
+      <p class="table-footnote">* Via conda-forge channel, not native CRAN/Bioconductor integration. &nbsp; &dagger; Via DESCRIPTION-based workflow, not a dedicated manifest format. &nbsp; &Dagger; Per <code>rv sysdeps</code>&rsquo; own help, coverage is currently Ubuntu/Debian.</p>
     </div>
   </section>
 
