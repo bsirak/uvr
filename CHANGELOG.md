@@ -19,6 +19,10 @@ Pure tracking section — fixes and small features land here between tags.
   fail closed instead of falling back to CRAN or the repository root. Cache,
   provenance, frozen sync, and renv `RemoteSha`/`RemoteSubdir` handling apply to
   direct and transitive packages alike.
+  One deliberate tightening rides along: a GitLab/Forgejo spec with a
+  bare trailing `@` (or a `/-/` path segment) is now rejected at parse
+  time instead of being read as "no ref" — cross-provider hardening,
+  not a regression.
 - **Full docs claim audit.** Every checkable factual claim in the README
   and the website was verified against primary sources (the tools' own
   docs and source, our own code and CLI). Fixed beyond the earlier
