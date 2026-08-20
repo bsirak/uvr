@@ -104,6 +104,12 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
             Some(pkg.requires.clone())
         };
 
+        // Never export a nested package after losing its exact source identity.
+        if pkg.subdirectory.is_some() {
+            uvr_core::registry::github::validate_nested_lock_entry(pkg)
+                .with_context(|| format!("Cannot export package '{}'", pkg.name))?;
+        }
+
         let remote_info = match &pkg.source {
             PackageSource::GitHub => pkg.url.as_ref().and_then(|u| parse_github_remote(u)),
             _ => None,
@@ -123,6 +129,15 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
         // rather than a single segment — same field, different shape.
         let git_host_info = forgejo_info.as_ref().or(gitlab_info.as_ref());
 
+        let remote_sha = if pkg.subdirectory.is_some() {
+            pkg.checksum
+                .as_deref()
+                .and_then(|c| c.strip_prefix("git:"))
+                .map(str::to_string)
+        } else {
+            None
+        };
+
         let entry = RenvPackage {
             package: pkg.name.clone(),
             version,
@@ -141,6 +156,8 @@ fn export_renv(lockfile: &Lockfile) -> Result<String> {
                 .as_ref()
                 .and_then(|(_, _, r)| r.clone())
                 .or_else(|| git_host_info.map(|(_, _, _, sha)| sha.clone())),
+            remote_sha,
+            remote_subdir: pkg.subdirectory.clone(),
             remote_url: git_host_info
                 .map(|(host, owner, repo, _)| format!("https://{host}/{owner}/{repo}")),
             remote_type: git_host_info.map(|_| "git2r".to_string()),
@@ -344,6 +361,10 @@ struct RenvPackage {
     remote_repo: Option<String>,
     #[serde(rename = "RemoteRef", skip_serializing_if = "Option::is_none")]
     remote_ref: Option<String>,
+    #[serde(rename = "RemoteSha", skip_serializing_if = "Option::is_none")]
+    remote_sha: Option<String>,
+    #[serde(rename = "RemoteSubdir", skip_serializing_if = "Option::is_none")]
+    remote_subdir: Option<String>,
     #[serde(rename = "RemoteUrl", skip_serializing_if = "Option::is_none")]
     remote_url: Option<String>,
     #[serde(rename = "RemoteType", skip_serializing_if = "Option::is_none")]
@@ -353,6 +374,7 @@ struct RenvPackage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uvr_core::lockfile::LockedPackage;
 
     #[test]
     fn parse_github_remote_api_url() {
@@ -405,6 +427,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
                 LockedPackage {
                     name: "DESeq2".to_string(),
@@ -416,6 +439,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
             ],
         };
@@ -457,6 +481,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
                 LockedPackage {
                     name: "DESeq2".to_string(),
@@ -468,6 +493,7 @@ mod tests {
                     url: None,
                     system_requirements: None,
                     dev: false,
+                    subdirectory: None,
                 },
             ],
         };
@@ -524,6 +550,7 @@ mod tests {
                 url: None,
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -555,6 +582,7 @@ mod tests {
                 url: Some("https://api.github.com/repos/user/mypkg/tarball/main".to_string()),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -564,6 +592,83 @@ mod tests {
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteUsername"], "user");
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteRepo"], "mypkg");
         assert_eq!(parsed["Packages"]["mypkg"]["RemoteRef"], "main");
+        let entry = parsed["Packages"]["mypkg"].as_object().unwrap();
+        assert!(!entry.contains_key("RemoteSha"));
+        assert!(!entry.contains_key("RemoteSubdir"));
+    }
+
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn nested_locked(url: &str, checksum: &str, subdirectory: Option<&str>) -> LockedPackage {
+        LockedPackage {
+            name: "nested".to_string(),
+            version: "0.1.0".to_string(),
+            raw_version: None,
+            source: PackageSource::GitHub,
+            checksum: Some(checksum.to_string()),
+            requires: vec![],
+            url: Some(url.to_string()),
+            system_requirements: None,
+            dev: false,
+            subdirectory: subdirectory.map(str::to_string),
+        }
+    }
+
+    fn single_package_lockfile(pkg: LockedPackage) -> Lockfile {
+        use uvr_core::lockfile::RVersionPin;
+        Lockfile {
+            r: RVersionPin {
+                version: "4.4.2".to_string(),
+                bioc_version: None,
+            },
+            packages: vec![pkg],
+        }
+    }
+
+    #[test]
+    fn export_renv_github_subdirectory_package() {
+        let lockfile = single_package_lockfile(nested_locked(
+            &format!("https://api.github.com/repos/owner/monorepo/tarball/{COMMIT}"),
+            &format!("git:{COMMIT}"),
+            Some("pkgs/nested"),
+        ));
+
+        let json = export_renv(&lockfile).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let entry = &parsed["Packages"]["nested"];
+        assert_eq!(entry["Source"], "GitHub");
+        assert_eq!(entry["RemoteUsername"], "owner");
+        assert_eq!(entry["RemoteRepo"], "monorepo");
+        assert_eq!(entry["RemoteSubdir"], "pkgs/nested");
+        assert_eq!(entry["RemoteSha"], COMMIT);
+        assert_eq!(entry["RemoteRef"], COMMIT);
+    }
+
+    #[test]
+    fn export_renv_fails_for_invalid_nested_identity() {
+        let good_url = format!("https://api.github.com/repos/owner/monorepo/tarball/{COMMIT}");
+        let good_checksum = format!("git:{COMMIT}");
+        let mut wrong_source = nested_locked(&good_url, &good_checksum, Some("pkgs/nested"));
+        wrong_source.source = PackageSource::Cran;
+        let cases = [
+            wrong_source,
+            nested_locked(&good_url, &good_checksum, Some("../escape")),
+            nested_locked(&good_url, "git:main", Some("pkgs/nested")),
+            nested_locked(
+                "https://api.github.com/repos/owner/monorepo/tarball/main",
+                &good_checksum,
+                Some("pkgs/nested"),
+            ),
+        ];
+        for pkg in cases {
+            assert!(
+                export_renv(&single_package_lockfile(pkg.clone())).is_err(),
+                "should fail rather than downgrade {:?} / {:?} / {:?}",
+                pkg.url,
+                pkg.checksum,
+                pkg.subdirectory
+            );
+        }
     }
 
     #[test]
@@ -582,6 +687,7 @@ mod tests {
             raw_version: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let (source, repository) = export_source_and_repository(&pkg.source);
         assert_eq!(source, "Git");
@@ -612,6 +718,7 @@ mod tests {
                 ),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -657,6 +764,7 @@ mod tests {
             raw_version: None,
             system_requirements: None,
             dev: false,
+            subdirectory: None,
         };
         let (source, repository) = export_source_and_repository(&pkg.source);
         assert_eq!(source, "Git");
@@ -687,6 +795,7 @@ mod tests {
                 ),
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 
@@ -742,6 +851,7 @@ mod tests {
                 url: None,
                 system_requirements: None,
                 dev: false,
+                subdirectory: None,
             }],
         };
 

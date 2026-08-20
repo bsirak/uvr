@@ -168,6 +168,7 @@ pub async fn run(
             }
             "GitHub" => {
                 github_count += 1;
+                let subdirectory = renv_subdirectory(name, pkg.remote_subdir.as_deref())?;
                 let git = match (&pkg.remote_username, &pkg.remote_repo) {
                     (Some(user), Some(repo)) => Some(format!("{user}/{repo}")),
                     _ => None,
@@ -187,6 +188,7 @@ pub async fn run(
                 DependencySpec::Detailed(DetailedDep {
                     git,
                     rev,
+                    subdirectory,
                     ..Default::default()
                 })
             }
@@ -419,6 +421,16 @@ fn strip_renv_hook(content: &str) -> String {
     out
 }
 
+fn renv_subdirectory(name: &str, value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    uvr_core::subdirectory::validate(value).map_err(|e| {
+        anyhow::anyhow!("package '{name}' has an invalid RemoteSubdir in renv.lock: {e}")
+    })?;
+    Ok(Some(value.to_string()))
+}
+
 // ─── renv.lock JSON types ───────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -449,11 +461,39 @@ struct RenvPackage {
     remote_ref: Option<String>,
     #[serde(rename = "RemoteSha")]
     remote_sha: Option<String>,
+    #[serde(rename = "RemoteSubdir")]
+    remote_subdir: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{rprofile_has_renv_hook, strip_renv_hook, validate_project_name};
+    use super::{
+        renv_subdirectory, rprofile_has_renv_hook, strip_renv_hook, validate_project_name,
+    };
+
+    #[test]
+    fn renv_subdirectory_maps_absent_and_empty_to_root() {
+        assert_eq!(renv_subdirectory("pkg", None).unwrap(), None);
+        assert_eq!(renv_subdirectory("pkg", Some("")).unwrap(), None);
+    }
+
+    #[test]
+    fn renv_subdirectory_preserves_a_safe_path() {
+        assert_eq!(
+            renv_subdirectory("pkg", Some("pkgs/nested")).unwrap(),
+            Some("pkgs/nested".to_string())
+        );
+    }
+
+    #[test]
+    fn renv_subdirectory_rejects_unsafe_paths() {
+        for bad in ["../escape", "/abs", "a//b", "a/../b", "C:/pkg"] {
+            assert!(
+                renv_subdirectory("pkg", Some(bad)).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+    }
 
     #[test]
     fn validate_project_name_accepts_cran_style() {

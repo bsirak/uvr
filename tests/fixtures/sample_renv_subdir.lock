@@ -1,0 +1,32 @@
+{
+  "R": {
+    "Version": "4.3.2",
+    "Repositories": [
+      {
+        "Name": "CRAN",
+        "URL": "https://cloud.r-project.org"
+      }
+    ]
+  },
+  "Packages": {
+    "nested": {
+      "Package": "nested",
+      "Version": "0.1.0",
+      "Source": "GitHub",
+      "RemoteUsername": "testuser",
+      "RemoteRepo": "monorepo",
+      "RemoteRef": "main",
+      "RemoteSha": "0123456789abcdef0123456789abcdef01234567",
+      "RemoteSubdir": "pkgs/nested"
+    },
+    "rooted": {
+      "Package": "rooted",
+      "Version": "0.2.0",
+      "Source": "GitHub",
+      "RemoteUsername": "testuser",
+      "RemoteRepo": "rooted",
+      "RemoteSha": "89abcdef0123456789abcdef0123456789abcdef",
+      "RemoteSubdir": ""
+    }
+  }
+}

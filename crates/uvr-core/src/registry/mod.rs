@@ -80,4 +80,5 @@ pub struct PackageInfo {
     pub raw_version: Option<String>,
     /// Raw `SystemRequirements` field from DESCRIPTION, if present.
     pub system_requirements: Option<String>,
+    pub subdirectory: Option<String>,
 }

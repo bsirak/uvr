@@ -534,6 +534,10 @@ Reproducibility notes recorded in the spec and surfaced to users:
 - The lock-time BFS (`lock.rs`, `resolve_git_deps`) gains a generic-git arm alongside the
   existing github/forgejo/gitlab dispatch. Note #174's `parse_gitlab_remotes` returns
   *all* git-bearing `Remotes:` entries, so cross-host chains keep working.
+- Preserve the source-chain boundary established by #244: only DESCRIPTION metadata
+  fetched from a manifest Git/URL source may introduce another remote source. Registry
+  packages never inject URLs into resolution, and a bound nested source never falls back
+  to a registry or repository root.
 - Install: `url`/git-archive/path all resolve to a source tarball (or dir) fed to the
   existing source-install path; `select_pkg_plan` (`sync.rs:57-95`) still prefers a P3M
   binary for CRAN names and falls back to these source URLs otherwise.

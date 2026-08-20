@@ -568,6 +568,7 @@ impl PackageRegistry for CranRegistry {
             url: self.tarball_url(entry),
             raw_version: Some(entry.raw_version.clone()),
             system_requirements: entry.system_requirements.clone(),
+            subdirectory: None,
         })
     }
 }

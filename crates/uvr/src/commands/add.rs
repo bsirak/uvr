@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use uvr_core::error::UvrError;
 use uvr_core::manifest::{DependencySpec, DetailedDep};
+use uvr_core::package_name;
 use uvr_core::project::Project;
 use uvr_core::r_version::detector::{find_r_binary, query_r_version};
 use uvr_core::registry::bioconductor::{default_release_for_r, BiocRegistry};
@@ -12,7 +13,23 @@ use uvr_core::resolver::is_base_package;
 use crate::ui;
 use crate::ui::palette;
 
-/// Parse `"pkg@>=1.0.0"` or `"user/repo@ref"` into (name, spec).
+fn split_subdirectory_fragment(raw: &str) -> Result<(&str, Option<&str>)> {
+    let Some((base, fragment)) = raw.split_once('#') else {
+        return Ok((raw, None));
+    };
+    let Some(path) = fragment.strip_prefix("subdirectory=") else {
+        anyhow::bail!(
+            "Unsupported fragment '#{fragment}' in '{raw}'. Expected: \
+             owner/repo[@revision]#subdirectory=path"
+        );
+    };
+    if let Err(e) = uvr_core::subdirectory::validate(path) {
+        anyhow::bail!("{e} (in '{raw}')");
+    }
+    Ok((base, Some(path)))
+}
+
+/// Parse `"pkg@>=1.0.0"`, `"user/repo@ref"`, or `"user/repo@ref#subdirectory=path"` into (name, spec).
 fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     // Forgejo: explicit `forgejo::host/owner/repo[@ref]` prefix. Checked
     // before the bare `user/repo` heuristic below so a forgejo spec
@@ -56,10 +73,11 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
 
     // GitHub: contains '/'
     if raw.contains('/') {
-        let (repo, git_ref) = if let Some(at) = raw.rfind('@') {
-            (raw[..at].to_string(), Some(raw[at + 1..].to_string()))
+        let (base, subdirectory) = split_subdirectory_fragment(raw)?;
+        let (repo, git_ref) = if let Some(at) = base.rfind('@') {
+            (base[..at].to_string(), Some(base[at + 1..].to_string()))
         } else {
-            (raw.to_string(), None)
+            (base.to_string(), None)
         };
 
         // Validate user/repo format
@@ -85,19 +103,33 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
             );
         }
 
-        let name = parts[1].to_string();
+        let name = match subdirectory {
+            Some(sub) => sub.rsplit('/').next().unwrap_or(sub).to_string(),
+            None => parts[1].to_string(),
+        };
 
         // Validate package name characters
-        if !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
-        {
+        if subdirectory.is_none() && !package_name::is_valid(&name) {
             anyhow::bail!("Invalid package name '{name}' extracted from GitHub spec '{raw}'");
+        }
+
+        if subdirectory.is_some() {
+            let full = match &git_ref {
+                Some(r) => format!("{repo}@{r}"),
+                None => repo.clone(),
+            };
+            if !uvr_core::registry::github::is_valid_github_repo_spec(&full) {
+                anyhow::bail!(
+                    "Invalid GitHub spec '{raw}'. Expected format: \
+                     owner/repo[@revision]#subdirectory=path"
+                );
+            }
         }
 
         let spec = DependencySpec::Detailed(DetailedDep {
             git: Some(repo),
             rev: git_ref,
+            subdirectory: subdirectory.map(str::to_string),
             ..Default::default()
         });
         return Ok((name, spec));
@@ -111,11 +143,7 @@ fn parse_add_spec(raw: &str, bioc: bool) -> Result<(String, DependencySpec)> {
     };
 
     // Validate CRAN/Bioc package name
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
-    {
+    if !package_name::is_valid(&name) {
         anyhow::bail!("Invalid package name '{name}'");
     }
 
@@ -199,7 +227,7 @@ pub async fn run(
     // `--no-lock`, the manifest entry uses the URL-derived basename and
     // the user can edit it later if it diverges from the actual Package.
     if !no_lock {
-        resolve_git_pkg_names(&mut parsed).await;
+        resolve_git_pkg_names(&mut parsed).await?;
     }
 
     // Reject base/recommended packages that ship with R — they can't be installed from CRAN.
@@ -441,9 +469,9 @@ async fn probe_bioc(project: &Project, name: &str) -> Option<bool> {
 /// (transport error, missing DESCRIPTION, malformed file) is logged
 /// internally and the URL-derived name is kept. If *every* git spec
 /// in the batch fails, surface a single user-facing warn so an offline
-/// user knows manifest names may need a manual touch-up. Returns no
-/// error: callers don't need to handle one.
-async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
+/// user knows manifest names may need a manual touch-up. A `subdirectory`
+/// spec is the exception: a failed lookup errors instead.
+async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) -> Result<()> {
     use uvr_core::registry::github::parse_github_spec;
 
     let needs_resolve: Vec<usize> = parsed
@@ -455,16 +483,22 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
         })
         .collect();
     if needs_resolve.is_empty() {
-        return;
+        return Ok(());
     }
+    let has_nested = needs_resolve
+        .iter()
+        .any(|&i| parsed[i].1.subdirectory().is_some());
 
     let client = match crate::commands::util::build_client() {
         Ok(c) => c,
         Err(e) => {
+            if has_nested {
+                anyhow::bail!("Could not build HTTP client for DESCRIPTION lookup: {e}");
+            }
             ui::warn(format!(
                 "Could not build HTTP client for DESCRIPTION lookup ({e}); using repo basenames as package names. Edit uvr.toml manually if names differ."
             ));
-            return;
+            return Ok(());
         }
     };
     let total = needs_resolve.len();
@@ -478,6 +512,7 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
             continue;
         };
         let git_ref_owned = d.rev.as_deref().unwrap_or("HEAD").to_string();
+        let subdirectory = d.subdirectory.clone();
 
         // Build the raw-DESCRIPTION URL appropriate for the registry, and
         // attach an appropriate token if one is in the environment.
@@ -516,9 +551,15 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
             let Some((user, repo, resolved_ref)) = parse_github_spec(&spec_str) else {
                 continue;
             };
-            let url = format!(
-                "https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION"
-            );
+            let url = match subdirectory.as_deref() {
+                Some(sub) => format!(
+                    "https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/{}/DESCRIPTION",
+                    uvr_core::subdirectory::encode_segments(sub)
+                ),
+                None => format!(
+                    "https://raw.githubusercontent.com/{user}/{repo}/{resolved_ref}/DESCRIPTION"
+                ),
+            };
             // #95: attach a GitHub token when available so CI runners
             // walking renv.lock imports don't hit the 60 req/hr shared
             // unauthenticated rate limit.
@@ -549,19 +590,42 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
             Ok(resp) => {
                 let text = resp.text().await.unwrap_or_default();
                 let fields = uvr_core::dcf::parse_dcf_fields(&text);
-                if let Some(actual) = fields.get("Package") {
-                    let actual = actual.trim().to_string();
-                    if !actual.is_empty() && actual != *provisional_name {
-                        ui::bullet_dim(format!(
-                            "{} → {} (Package: field in DESCRIPTION)",
-                            palette::dim(provisional_name),
-                            palette::pkg(&actual)
-                        ));
-                        parsed[idx].0 = actual;
+                let actual = fields
+                    .get("Package")
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty());
+                match (actual, subdirectory.as_deref()) {
+                    (None, Some(sub)) => anyhow::bail!(
+                        "DESCRIPTION at {git}@{git_ref_owned} in '{sub}' has no `Package:` field; \
+                         cannot identify the package at that subdirectory."
+                    ),
+                    (Some(actual), sub) => {
+                        if let Some(sub) = sub {
+                            if !package_name::is_valid(&actual) {
+                                anyhow::bail!(
+                                    "DESCRIPTION at {git}@{git_ref_owned} in '{sub}' declares an \
+                                     invalid `Package:` name '{actual}'."
+                                );
+                            }
+                        }
+                        if actual != *provisional_name {
+                            ui::bullet_dim(format!(
+                                "{} → {} (Package: field in DESCRIPTION)",
+                                palette::dim(provisional_name),
+                                palette::pkg(&actual)
+                            ));
+                            parsed[idx].0 = actual;
+                        }
                     }
+                    (None, None) => {}
                 }
             }
             Err(e) => {
+                if let Some(sub) = subdirectory.as_deref() {
+                    anyhow::bail!(
+                        "Failed to fetch DESCRIPTION for {git}@{git_ref_owned} in '{sub}': {e}"
+                    );
+                }
                 tracing::warn!(
                     "DESCRIPTION fetch failed for {git}@{git_ref_owned}: {e}; using {provisional_name} as the package name"
                 );
@@ -577,6 +641,7 @@ async fn resolve_git_pkg_names(parsed: &mut [(String, DependencySpec)]) {
             "Could not reach git host to look up DESCRIPTION fields; package names default to repo basenames. Edit uvr.toml if a name differs.",
         );
     }
+    Ok(())
 }
 
 fn format_spec(spec: &DependencySpec) -> String {
@@ -585,7 +650,10 @@ fn format_spec(spec: &DependencySpec) -> String {
         DependencySpec::Detailed(d) => {
             if let Some(git) = &d.git {
                 let rev = d.rev.as_deref().unwrap_or("HEAD");
-                format!("{git}@{rev}")
+                match d.subdirectory.as_deref() {
+                    Some(sub) => format!("{git}@{rev}#subdirectory={sub}"),
+                    None => format!("{git}@{rev}"),
+                }
             } else if d.bioc.unwrap_or(false) {
                 "[bioc]".to_string()
             } else {
@@ -611,6 +679,112 @@ mod tests {
         let (name, spec) = parse_add_spec("tidyverse/ggplot2@main", false).unwrap();
         assert_eq!(name, "ggplot2");
         assert!(spec.git().is_some());
+    }
+
+    #[test]
+    fn parse_github_subdirectory_fragment() {
+        let (name, spec) =
+            parse_add_spec("owner/repo@v1.0#subdirectory=pkgs/nested", false).unwrap();
+        assert_eq!(name, "nested");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.git.as_deref(), Some("owner/repo"));
+                assert_eq!(d.rev.as_deref(), Some("v1.0"));
+                assert_eq!(d.subdirectory.as_deref(), Some("pkgs/nested"));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_github_subdirectory_without_revision() {
+        let (name, spec) = parse_add_spec("owner/repo#subdirectory=nested", false).unwrap();
+        assert_eq!(name, "nested");
+        match spec {
+            DependencySpec::Detailed(d) => {
+                assert_eq!(d.git.as_deref(), Some("owner/repo"));
+                assert_eq!(d.rev, None);
+                assert_eq!(d.subdirectory.as_deref(), Some("nested"));
+            }
+            other => panic!("expected Detailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_github_root_spec_has_no_subdirectory() {
+        let (_, spec) = parse_add_spec("tidyverse/ggplot2@main", false).unwrap();
+        assert_eq!(spec.subdirectory(), None);
+        assert_eq!(format_spec(&spec), "tidyverse/ggplot2@main");
+    }
+
+    #[test]
+    fn format_spec_shows_the_package_directory() {
+        let (_, spec) = parse_add_spec("owner/repo@v1.0#subdirectory=pkgs/nested", false).unwrap();
+        assert_eq!(
+            format_spec(&spec),
+            "owner/repo@v1.0#subdirectory=pkgs/nested"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_safe_nested_paths_that_are_not_package_names() {
+        for (raw, sub) in [
+            ("owner/repo@main#subdirectory=pkgs/my pkg", "pkgs/my pkg"),
+            ("owner/repo#subdirectory=a+b", "a+b"),
+        ] {
+            let (name, spec) = parse_add_spec(raw, false).unwrap_or_else(|e| {
+                panic!("should accept {raw}: {e}");
+            });
+            assert_eq!(spec.subdirectory(), Some(sub));
+            assert_eq!(name, sub.rsplit('/').next().unwrap());
+            assert_eq!(spec.git(), Some("owner/repo"));
+        }
+    }
+
+    #[test]
+    fn parse_gates_root_and_cran_names_on_the_shared_charset() {
+        for ok in ["data.table", "owner/my-pkg_1"] {
+            assert!(parse_add_spec(ok, false).is_ok(), "should accept {ok}");
+        }
+        for bad in [
+            "bad+name",
+            "my pkg",
+            "..",
+            "owner/bad+name",
+            "owner/my pkg",
+            "owner/..",
+        ] {
+            assert!(parse_add_spec(bad, false).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_bad_subdirectory_fragments() {
+        for bad in [
+            "owner/repo#subdirectory=",
+            "owner/repo#subdirectory=../escape",
+            "owner/repo#subdirectory=/abs",
+            "owner/repo#subdirectory=a//b",
+            "owner/repo#subdirectory=C:/pkg",
+            "owner/repo#subdir=nested",
+            "owner/repo#pull/12",
+            "owner/repo@#subdirectory=nested",
+            "owner/@main#subdirectory=nested",
+            "/repo@main#subdirectory=nested",
+        ] {
+            assert!(parse_add_spec(bad, false).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_subdirectory_on_non_github_hosts() {
+        for bad in [
+            "gitlab::gitlab.com/g/p#subdirectory=nested",
+            "forgejo::codefloe.com/o/r#subdirectory=nested",
+            "nested#subdirectory=nested",
+        ] {
+            assert!(parse_add_spec(bad, false).is_err(), "should reject {bad}");
+        }
     }
 
     #[test]

@@ -340,6 +340,12 @@ fn remove_entry(path: &Path) -> std::io::Result<()> {
     }
 }
 
+fn published_entry_is_equivalent(entry_pkg_dir: &Path, source_pkg_dir: &Path) -> bool {
+    let expected = crate::installer::nested_source::read_provenance(source_pkg_dir);
+    entry_pkg_dir.join("DESCRIPTION").exists()
+        && crate::installer::nested_source::provenance_matches(entry_pkg_dir, expected.as_ref())
+}
+
 /// Atomically store a package directory into the global cache.
 ///
 /// Uses a temporary directory + rename so concurrent processes never see
@@ -361,26 +367,21 @@ pub fn store(
 
     let final_dir = packages_dir.join(key);
     if final_dir.exists() {
-        if final_dir.join(package_name).join("DESCRIPTION").exists() {
-            // Already cached (another process or a previous run).
+        if published_entry_is_equivalent(&final_dir.join(package_name), source_pkg_dir) {
             return Ok(());
         }
-        // Corrupted/partial entry from a prior crash — remove and replace.
         if let Err(e) = std::fs::remove_dir_all(&final_dir) {
-            // The removal may "fail" benignly when a concurrent process
-            // already removed (or is busy replacing) the entry. Only give up
-            // if the poisoned directory is genuinely still there — otherwise
-            // fall through and let the rename below resolve any race.
-            if final_dir.exists() && !final_dir.join(package_name).join("DESCRIPTION").exists() {
+            if final_dir.exists()
+                && !published_entry_is_equivalent(&final_dir.join(package_name), source_pkg_dir)
+            {
                 tracing::warn!(
-                    "Cannot remove corrupted cache entry {}: {e}; \
-                     the entry will never be usable until it is deleted",
+                    "Cannot replace invalid cache entry {}: {e}",
                     final_dir.display()
                 );
                 return Err(std::io::Error::new(
                     e.kind(),
                     format!(
-                        "failed to remove corrupted cache entry {}: {e}",
+                        "failed to replace invalid cache entry {}: {e}",
                         final_dir.display()
                     ),
                 ));
@@ -429,24 +430,18 @@ pub fn store(
                 || e.raw_os_error() == Some(39 /* ENOTEMPTY */)
                 || e.raw_os_error() == Some(17 /* EEXIST */) =>
         {
-            // The target exists. Distinguish "another process cached it
-            // first" (benign race — the entry is valid, keep it) from "a
-            // corrupted entry we failed to remove is still squatting on the
-            // key" (silent permanent cache miss if reported as success).
-            if final_dir.join(package_name).join("DESCRIPTION").exists() {
-                // Another process cached it first — our staging dir will be
-                // cleaned up by the TempDir drop.
+            if published_entry_is_equivalent(&final_dir.join(package_name), source_pkg_dir) {
                 debug!("Cache race for {}, using existing entry", package_name);
                 Ok(())
             } else {
                 tracing::warn!(
-                    "Cache entry {} exists but is corrupted and could not be replaced",
+                    "Cache entry {} exists but is invalid and could not be replaced",
                     final_dir.display()
                 );
                 Err(std::io::Error::new(
                     e.kind(),
                     format!(
-                        "corrupted cache entry {} could not be replaced: {e}",
+                        "invalid cache entry {} could not be replaced: {e}",
                         final_dir.display()
                     ),
                 ))
@@ -977,6 +972,53 @@ mod tests {
         assert!(lookup("testpkg", &key).is_some()); // now valid
 
         // Cleanup
+        let _ = std::fs::remove_dir_all(global_packages_dir().join(&key));
+    }
+
+    #[test]
+    fn store_replaces_mismatched_nested_provenance() {
+        use crate::installer::nested_source::{self, NestedProvenance};
+
+        let tmp = TempDir::new().unwrap();
+        let pkg_dir = tmp.path().join("testpkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("DESCRIPTION"),
+            "Package: testpkg\nVersion: 1.0\n",
+        )
+        .unwrap();
+        let expected = NestedProvenance {
+            url:
+                "https://api.github.com/repos/o/r/tarball/0123456789abcdef0123456789abcdef01234567"
+                    .into(),
+            checksum: "git:0123456789abcdef0123456789abcdef01234567".into(),
+            subdirectory: "pkgs/testpkg".into(),
+        };
+        nested_source::write_marker(&pkg_dir, &expected).unwrap();
+
+        let key = format!(
+            "testpkg-1.0-nested{:023x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let existing = global_packages_dir().join(&key).join("testpkg");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(
+            existing.join("DESCRIPTION"),
+            "Package: testpkg\nVersion: 1.0\n",
+        )
+        .unwrap();
+        let wrong = NestedProvenance {
+            subdirectory: "pkgs/other".into(),
+            ..expected.clone()
+        };
+        nested_source::write_marker(&existing, &wrong).unwrap();
+
+        store(&pkg_dir, &key, "testpkg", None).unwrap();
+        let cached = lookup("testpkg", &key).unwrap();
+        assert!(nested_source::provenance_matches(&cached, Some(&expected)));
         let _ = std::fs::remove_dir_all(global_packages_dir().join(&key));
     }
 
