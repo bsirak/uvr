@@ -313,6 +313,26 @@ Scripts run isolated from any project you happen to be standing in: the
 project library, its `.r-version` pin, and its `.Rprofile` are all bypassed,
 so a script behaves the same wherever it is invoked from.
 
+A script can also carry a shebang and run as a plain executable:
+
+```r
+#!/usr/bin/env -S uvr run
+# /// script
+# dependencies = ["praise"]
+# ///
+
+cat(praise::praise(), "\n")
+```
+
+```console
+$ chmod +x hooray
+$ ./hooray
+You are wondrous!
+```
+
+The `-S` flag needs GNU coreutils 8.30+ on Linux; macOS and the BSDs have
+supported it for years.
+
 ---
 
 ## Shell activation
