@@ -19,6 +19,67 @@ Pure tracking section — fixes and small features land here between tags.
   fail closed instead of falling back to CRAN or the repository root. Cache,
   provenance, frozen sync, and renv `RemoteSha`/`RemoteSubdir` handling apply to
   direct and transitive packages alike.
+- **Full docs claim audit.** Every checkable factual claim in the README
+  and the website was verified against primary sources (the tools' own
+  docs and source, our own code and CLI). Fixed beyond the earlier
+  Rationale pass: the sysreqs section still credited the r-hub sysreqs
+  API (uvr uses the vendored r-system-requirements rules plus Posit's
+  sysreqs API, across apt/dnf/zypper/apk); the "From R" install snippet
+  was uninstallable as written (uvr-r is not on CRAN — now
+  `pak::pak("nbafrank/uvr-r")`); renv's "run scripts" cell was wrong in
+  both feature matrices (`renv::run()` exists); the rig admin footnote
+  now cites rig's own FAQ (no admin, period — not just Windows); the
+  site claimed an ~8 MB binary (it is ~12 MB); the `uvr doctor` example
+  was refreshed to current output; `uvr self-update` is documented under
+  its canonical name `uvr upgrade`. Verified-as-written and left alone:
+  install script behavior, AUR packages, platform table, glibc/musl
+  build channels, activation docs, standalone-script docs, all remaining
+  matrix cells.
+
+- **Corrected false claims in the docs, flagged by r/rstats.**
+  The README's Rationale said renv installs are "slow and require
+  compilation on Linux" (mirror-dependent, not true with a binary repo
+  like P3M — our own benchmark shows it), said pak has "no lockfile"
+  (`pak::lockfile_create()` exists, and our own feature matrix said Y),
+  and the website's comparison table still had rv's column from before
+  PR #254 (no `rv run`, no sysdeps, no CI mode). All fixed.
+- **The website's benchmark numbers were invalid and are replaced.**
+  `bench.sh` pointed every R tool at P3M's source-only path
+  (`p3m.dev/cran/latest`), so in the Linux container install.packages
+  and pak compiled everything from source (865s / 414s for tidyverse)
+  while uvr used binaries — that is not a comparison, and the "142x"
+  headline built on it was wrong. The script now uses the
+  `__linux__/<codename>` binary path plus an R User-Agent on Linux, and
+  the site now shows the corrected container run (cold tier: uvr 10.4s
+  vs install.packages 29.2s for tidyverse — 2.8x, not 142x; warm runs
+  are far faster still). The same fix made the pathological pak and
+  warm-sync numbers from #235/#237 disappear, so those were likely the
+  mirror bug too.
+
+- **`--install-system-deps` now runs the setup commands the sysreqs rules
+  carry**, so it works on distros where the packages do not exist until a
+  repository is enabled.
+  63 of the 131 vendored rule files have a `pre_install` and 2 have a
+  `post_install`, and uvr dropped all of them: on Rocky 9 it tried to
+  install `gdal3.4-devel` from repos that were never enabled, and `rJava`
+  never got its `R CMD javareconf`.
+  `pre_install` now runs before the batched package install and
+  `post_install` after, both only when something is actually missing, so a
+  fully provisioned machine does not re-enable EPEL on every sync.
+  Nothing runs without `--install-system-deps` / `UVR_INSTALL_SYSREQS=1`.
+
+- **The consent block says where each root command comes from and what it
+  does.**
+  These are shell strings run as root, and two of them are worth reading
+  before approving: they arrive either from uvr's vendored
+  `r-system-requirements` snapshot or from Posit's API fetched during that
+  sync, and some of them fetch and execute remote code, install from a
+  URL, disable signature checking, or add a third-party repository.
+  Each command is now listed with both, on stderr alongside the prompt and
+  unconditionally, so redirecting stdout to a build log cannot separate
+  the consent from what it covers.
+  The block also states that an unannotated command is one uvr matched no
+  pattern in rather than one it vetted.
 
 ## v0.4.6 (2026-08-10)
 

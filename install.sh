@@ -62,7 +62,13 @@ resolve_version() {
     if [ -n "${UVR_VERSION:-}" ]; then
         VERSION="$UVR_VERSION"
     else
-        VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+        # Send a token if the environment has one — anonymous requests share
+        # a 60/hr quota per source IP, which CI runners exhaust constantly.
+        _auth=""
+        if [ -n "${GITHUB_TOKEN:-${GH_TOKEN:-}}" ]; then
+            _auth="Authorization: Bearer ${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+        fi
+        VERSION="$(curl -fsSL ${_auth:+-H "$_auth"} "https://api.github.com/repos/$REPO/releases/latest" \
             | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')"
         if [ -z "$VERSION" ]; then
             err "Failed to determine latest version"

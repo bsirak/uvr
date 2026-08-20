@@ -56,6 +56,17 @@ pub fn info(text: impl std::fmt::Display) {
     println!("{} {text}", palette::info(glyph::info()));
 }
 
+/// `› <text>` on **stderr** — informational headline that belongs with the
+/// diagnostics rather than with the command's data output.
+///
+/// Use this when the line has to stay glued to a `warn`/`hint`/prompt
+/// sequence: those all go to stderr, so an [`info`] line printed to stdout
+/// disappears from the user's terminal the moment they redirect stdout to a
+/// log file, leaving a prompt whose context is missing.
+pub fn info_err(text: impl std::fmt::Display) {
+    eprintln!("{} {text}", palette::info(glyph::info()));
+}
+
 /// Dedicated hint line — use after an error or warning to tell the user
 /// what to do next. Renders as:
 ///
@@ -79,9 +90,31 @@ pub fn bullet(text: impl std::fmt::Display) {
     println!("  {} {text}", palette::dim(glyph::bullet()));
 }
 
+/// Indented bullet `  · <text>` on **stderr** — the [`info_err`] counterpart,
+/// for listing items under a stderr headline.
+pub fn bullet_err(text: impl std::fmt::Display) {
+    eprintln!("  {} {text}", palette::dim(glyph::bullet()));
+}
+
 /// Indented bullet with explicit dim body — for metadata under a header.
 pub fn bullet_dim(text: impl std::fmt::Display) {
     println!("  {} {}", palette::dim(glyph::bullet()), palette::dim(text));
+}
+
+/// Dim continuation line under a [`bullet_err`], indented one level further:
+/// `      <text>`. For annotating a listed item without competing with it —
+/// the sysreqs consent block uses it to tag each command's provenance and
+/// what it does.
+pub fn sub_err(text: impl std::fmt::Display) {
+    eprintln!("      {}", palette::dim(text));
+}
+
+/// Dim line at [`bullet_err`] indentation but with no bullet glyph:
+/// `  <text>`. For a remark about a stderr list as a whole — at bullet
+/// depth it cannot be misread as an annotation of the last item the way a
+/// [`sub_err`] would be.
+pub fn note_err(text: impl std::fmt::Display) {
+    eprintln!("  {}", palette::dim(text));
 }
 
 /// `<glyph> <pkg-name> <version>` — a single row in a change list.

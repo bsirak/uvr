@@ -42,8 +42,14 @@ function Get-Target {
 
 function Get-LatestVersion {
     $uri = "https://api.github.com/repos/$Repo/releases/latest"
+    # Unauthenticated requests share a 60/hr quota per source IP, which CI
+    # runners and corporate NATs exhaust constantly. Send a token if the
+    # environment has one; anonymous otherwise.
+    $headers = @{ "User-Agent" = "uvr-install" }
+    $token = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } elseif ($env:GH_TOKEN) { $env:GH_TOKEN }
+    if ($token) { $headers["Authorization"] = "Bearer $token" }
     try {
-        $release = Invoke-RestMethod -Uri $uri -Headers @{ "User-Agent" = "uvr-install" }
+        $release = Invoke-RestMethod -Uri $uri -Headers $headers
     } catch {
         Write-ErrExit "Failed to determine latest version: $_"
     }

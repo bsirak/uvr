@@ -20,7 +20,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUNS="${BENCH_RUNS:-5}"
+# P3M serves Linux *binaries* only from the __linux__/<codename> path and
+# only to clients whose User-Agent looks like R. The bare /cran/latest path
+# is source-only on Linux — benching install.packages/pak against it makes
+# them compile everything from source while uvr gets binaries, which is not
+# a comparison worth publishing (this exact mistake produced the 865s
+# tidyverse number that shipped to the website).
 P3M_REPO="https://p3m.dev/cran/latest"
+if [ "$(uname -s)" = "Linux" ] && [ -r /etc/os-release ]; then
+    _codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+    if [ -n "$_codename" ]; then
+        P3M_REPO="https://p3m.dev/cran/__linux__/${_codename}/latest"
+    fi
+    unset _codename
+fi
 JSON_OUT="$SCRIPT_DIR/bench-results.json"
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -257,7 +270,9 @@ bench_install_packages() {
 lib <- file.path(getwd(), "iplib")
 dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 .libPaths(lib)
-options(repos = c(CRAN = "${P3M_REPO}"))
+options(repos = c(CRAN = "${P3M_REPO}"),
+        HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
+            paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
 install.packages("${scenario}", lib = lib, quiet = TRUE, dependencies = NA)
 REOF
     (cd "$warmdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_ip.R >/dev/null 2>&1) || true
@@ -277,7 +292,9 @@ REOF
 lib <- file.path(getwd(), "iplib")
 dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 .libPaths(lib)
-options(repos = c(CRAN = "${P3M_REPO}"))
+options(repos = c(CRAN = "${P3M_REPO}"),
+        HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
+            paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
 install.packages("${scenario}", lib = lib, quiet = TRUE, dependencies = NA)
 REOF
         local t
@@ -329,7 +346,9 @@ dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 # Load pak before isolating .libPaths (pak lives in the system library)
 library(pak)
 .libPaths(lib)
-options(repos = c(CRAN = "${P3M_REPO}"))
+options(repos = c(CRAN = "${P3M_REPO}"),
+        HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
+            paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
 pak::pkg_install("${scenario}", lib = lib, ask = FALSE, upgrade = FALSE)
 REOF
     (cd "$warmdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_pak.R >/dev/null 2>&1) || true
@@ -350,7 +369,9 @@ lib <- file.path(getwd(), "paklib")
 dir.create(lib, recursive = TRUE, showWarnings = FALSE)
 library(pak)
 .libPaths(lib)
-options(repos = c(CRAN = "${P3M_REPO}"))
+options(repos = c(CRAN = "${P3M_REPO}"),
+        HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
+            paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
 pak::pkg_install("${scenario}", lib = lib, ask = FALSE, upgrade = FALSE)
 REOF
         local t
@@ -398,7 +419,9 @@ bench_pak_lockfile() {
     mkdir -p "$lockdir/.uvr/library"
     cat > "$lockdir/bench_pak_lock.R" <<REOF
 library(pak)
-options(repos = c(CRAN = "${P3M_REPO}"))
+options(repos = c(CRAN = "${P3M_REPO}"),
+        HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
+            paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
 pak::lockfile_create("${scenario}", lockfile = file.path(getwd(), "pkg.lock"), lib = tempfile(), dependencies = TRUE)
 REOF
     (cd "$lockdir" && R_LIBS= R_LIBS_USER= R_LIBS_SITE= "$UVR" run bench_pak_lock.R >/dev/null 2>&1) || {
@@ -492,7 +515,9 @@ bench_renv() {
     mkdir -p "$warmdir/.uvr/library"
     cat > "$warmdir/bench_renv.R" <<REOF
 library(renv)
-options(repos = c(CRAN = "${P3M_REPO}"))
+options(repos = c(CRAN = "${P3M_REPO}"),
+        HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
+            paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
 renv::init(bare = TRUE)
 renv::install("${scenario}", prompt = FALSE)
 REOF
@@ -511,7 +536,9 @@ REOF
 
         cat > "$benchdir/bench_renv.R" <<REOF
 library(renv)
-options(repos = c(CRAN = "${P3M_REPO}"))
+options(repos = c(CRAN = "${P3M_REPO}"),
+        HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(),
+            paste(getRversion(), R.version[["platform"]], R.version[["arch"]], R.version[["os"]])))
 renv::init(bare = TRUE)
 renv::install("${scenario}", prompt = FALSE)
 REOF
