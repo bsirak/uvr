@@ -58,7 +58,7 @@ Here is how existing tools compare and where the gaps are:
 - **renv** — the de-facto standard for reproducibility. It snapshots an existing library into a lockfile, but it does not pin R versions ("renv tracks, but doesn't help with, the version of R used") and it works library-first: the lockfile records what your library already has rather than driving what gets installed. Install speed is a property of your mirror, not of renv — pointed at a binary repo like P3M it is fast (see the benchmarks below).
 - **pak** — fast parallel installs and good system dependency detection. It does have lockfiles (`pak::lockfile_create()` / `pak::lockfile_install()`, aimed at CI), but no R version management, and it is an installer rather than a project workflow — in practice paired with renv, not a replacement for it.
 - **rv** — the closest prior art: Rust-based, declarative, fast, with P3M binaries, `rv run`, `rv sysdeps`, and `rv sync --locked` for CI. It selects among the R versions already installed on the machine — including ones `rig` put there — but does not install R itself, which is the gap `uvr` closes.
-- **rig** — excellent R version manager. No package management or lockfile. Requires admin rights on Windows.
+- **rig** — excellent R version manager. No package management or lockfile. Per its own FAQ it cannot install R without admin permissions.
 - **pixi** — conda-based multi-language environment manager. Supports R via conda-forge, but packages come from conda-forge rather than CRAN/Bioconductor/P3M natively. Language-agnostic by design; not R-first.
 - **rix** — Nix-based, with extreme reproducibility including system-level dependencies. Right tool if you need bit-for-bit reproducibility across machines. Requires Nix; a different philosophy than a fast pragmatic workflow.
 
@@ -80,7 +80,7 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 | Lockfile                       | Y   | Y    | Y   | Y   | -   | Y    |
 | R version selection / pinning  | Y   | -    | -   | Y   | Y   | Y    |
 | Installs R itself              | Y   | -    | -   | -   | Y   | Y    |
-| Run scripts in isolated env    | Y   | -    | -   | Y   | -   | Y    |
+| Run scripts in isolated env    | Y   | Y    | -   | Y   | -   | Y    |
 | CRAN packages                  | Y   | Y    | Y   | Y   | -   | Y*   |
 | Bioconductor packages          | Y   | Y    | Y   | Y   | -   | Y*   |
 | GitHub packages                | Y   | Y    | Y   | Y   | -   | -    |
@@ -92,7 +92,7 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 | Windows support                | Y   | Y    | Y   | Y   | Y   | Y    |
 
 \* pixi installs R packages from conda-forge, not CRAN/Bioconductor directly.
-\** rig requires admin rights on Windows.
+\** Per rig's own FAQ, rig cannot install R without admin permissions.
 † Via DESCRIPTION-based workflow, not a dedicated manifest format.
 ‡ Per `rv sysdeps`' own help, coverage is currently Ubuntu/Debian.
 
@@ -180,11 +180,9 @@ On Windows, download `uvr-x86_64-pc-windows-msvc.zip` from the releases page and
 The companion R package can install the binary for you:
 
 ```r
-# Install the R package
-install.packages("uvr", repos = NULL, type = "source",
-                  INSTALL_opts = "--no-multiarch")
-# Or from the repo:
-# install.packages("path/to/r-package", repos = NULL, type = "source")
+# Install the R package from GitHub (uvr-r is not on CRAN yet)
+pak::pak("nbafrank/uvr-r")
+# or: remotes::install_github("nbafrank/uvr-r")
 
 # Download and install the uvr binary
 uvr::install_uvr()
@@ -266,7 +264,7 @@ uvr tree
 | `uvr export -o renv.lock` | Export to a file |
 | `uvr import` | Import packages from an renv.lock file |
 | `uvr import --lock` | Import and immediately resolve + install |
-| `uvr self-update` | Update uvr itself to the latest GitHub release |
+| `uvr upgrade` | Update uvr itself to the latest GitHub release (alias: `uvr self-update`) |
 | `uvr doctor` | Diagnose environment issues (R, build tools, project status) |
 | `uvr completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
 | `uvr cache clean` | Remove all cached package downloads |
@@ -465,7 +463,9 @@ testthat = "*"
 
 ## System dependencies (Linux)
 
-On Linux, `uvr sync` automatically checks for missing system libraries using the [r-hub sysreqs API](https://sysreqs.r-hub.io/) and prints the `apt-get install` command needed:
+On Linux, `uvr sync` automatically checks for missing system libraries and
+prints the install command for your distro's package manager (`apt-get`,
+`dnf`, `zypper`, or `apk`):
 
 ```
 ! Missing system dependencies for 2 package(s):
@@ -475,6 +475,13 @@ On Linux, `uvr sync` automatically checks for missing system libraries using the
   Install with: sudo apt-get install -y libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev
 ```
 
+Pass `--install-system-deps` (or set `UVR_INSTALL_SYSREQS=1`) and uvr runs
+the commands itself, showing each one and where it came from before
+anything executes as root. Requirements are resolved from the
+[r-system-requirements](https://github.com/rstudio/r-system-requirements)
+rules vendored into uvr, cross-checked against Posit's sysreqs API when
+reachable.
+
 ---
 
 ## Environment diagnostics
@@ -482,29 +489,30 @@ On Linux, `uvr sync` automatically checks for missing system libraries using the
 Run `uvr doctor` to check your setup:
 
 ```
-uvr doctor
+> uvr doctor
 
-  • Platform: macos/aarch64
-  • P3M binary packages: available
+Platform
+  v OS / architecture            macos/aarch64
+  v P3M binary packages          available
 
 R installations
-  ✓ R 4.5.3 at ~/.uvr/r-versions/4.5.3/bin/R (managed)
-  ✓ R 4.4.2 at ~/.uvr/r-versions/4.4.2/bin/R (managed)
-  → Active R: 4.5.3
+  v R 4.5.3                      ~/.uvr/r-versions/4.5.3/bin/R - managed
+  v R 4.4.2                      ~/.uvr/r-versions/4.4.2/bin/R - managed
+  -> active                      4.5.3 ~/.uvr/r-versions/4.5.3/bin/R
 
 Build tools
-  ✓ cargo (Rust toolchain): found
-  ✓ Xcode command line tools: found
-  ✓ Homebrew: found
+  v cargo (Rust toolchain)       found
+  v Xcode command line tools     found
+  v Homebrew                     found
 
 Project
-  ✓ Manifest: uvr.toml
-  ✓ Lockfile: 42 package(s), R 4.5.3
+  v Manifest                     uvr.toml
+  v Lockfile                     42 package(s), R 4.5.3
 
 Cache
-  • 166 file(s), 204.6 MB
+  - 166 file(s), 204.6 MB
 
-✓ No issues found
+v No issues found
 ```
 
 ---

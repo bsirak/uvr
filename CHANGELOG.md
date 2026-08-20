@@ -7,6 +7,23 @@ release page on GitHub. Issue numbers reference https://github.com/nbafrank/uvr/
 
 Pure tracking section — fixes and small features land here between tags.
 
+- **Full docs claim audit.** Every checkable factual claim in the README
+  and the website was verified against primary sources (the tools' own
+  docs and source, our own code and CLI). Fixed beyond the earlier
+  Rationale pass: the sysreqs section still credited the r-hub sysreqs
+  API (uvr uses the vendored r-system-requirements rules plus Posit's
+  sysreqs API, across apt/dnf/zypper/apk); the "From R" install snippet
+  was uninstallable as written (uvr-r is not on CRAN — now
+  `pak::pak("nbafrank/uvr-r")`); renv's "run scripts" cell was wrong in
+  both feature matrices (`renv::run()` exists); the rig admin footnote
+  now cites rig's own FAQ (no admin, period — not just Windows); the
+  site claimed an ~8 MB binary (it is ~12 MB); the `uvr doctor` example
+  was refreshed to current output; `uvr self-update` is documented under
+  its canonical name `uvr upgrade`. Verified-as-written and left alone:
+  install script behavior, AUR packages, platform table, glibc/musl
+  build channels, activation docs, standalone-script docs, all remaining
+  matrix cells.
+
 - **Corrected false claims in the docs, flagged by r/rstats.**
   The README's Rationale said renv installs are "slow and require
   compilation on Linux" (mirror-dependent, not true with a binary repo
