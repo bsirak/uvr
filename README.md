@@ -101,13 +101,13 @@ If you are happy with renv + rig, that is a perfectly good setup. `uvr` is for p
 ## Benchmarks
 
 <!-- BENCH:START - auto-updated by benchmarks/update-readme.sh -->
-Install wall time (empty library, index caches warm). All tools use P3M as CRAN mirror. Median of 5 runs on Apple Silicon (arm64), R 4.5.
+Install wall time (empty library, index caches warm). All tools use P3M as CRAN mirror. Median of 5 runs on Apple Silicon (arm64), R 4.6.0, uvr 0.4.6. pak was not installed on the bench machine for this run; container numbers including pak are on the [website](https://nbafrank.github.io/uvr/).
 
-| Scenario | Packages | uvr sync | renv | install.packages | pak |
-|----------|----------|----------|------|------------------|-----|
-| jsonlite  | 1        | **0.21s**  | 0.5s   | 2.21s              | 2.98s |
-| ggplot2   | 17       | **0.21s**  | 0.54s  | 4.4s               | 5.62s |
-| tidyverse | 99       | **0.27s**  | 0.82s  | 11.78s             | 8.1s  |
+| Scenario | Packages | uvr sync | renv | install.packages |
+|----------|----------|----------|------|------------------|
+| jsonlite  | 1        | **0.52s**  | 0.56s  | 2.95s              |
+| ggplot2   | 17       | **0.51s**  | 0.61s  | 5.1s               |
+| tidyverse | 100      | **0.57s**  | 0.81s  | 14.92s             |
 <!-- BENCH:END -->
 
 > uvr pre-resolves dependencies into a lockfile (`uvr lock`); only `uvr sync` (install) is timed. The other tools resolve dependencies inline. renv uses its default global cache (symlinks).

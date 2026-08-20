@@ -651,7 +651,12 @@ print_table "cold" "### First run (all caches cleared)"
 
 # ─── methodology ───────────────────────────────────────────────────────────
 
-R_VER=$(R --vanilla --slave -e 'cat(R.version.string)' 2>/dev/null || echo "R (version unknown)")
+# Bare `R` may not exist on a machine where R is uvr-managed — fall back to
+# the uvr-resolved interpreter before giving up.
+R_VER=$(R --vanilla --slave -e 'cat(R.version.string)' 2>/dev/null \
+    || Rscript -e 'cat(R.version.string)' 2>/dev/null \
+    || "$UVR" doctor 2>/dev/null | awk '/active/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) {print "R version " $i; exit}}')
+R_VER=${R_VER:-"R (version unknown)"}
 echo "_Measured on $(uname -m), ${R_VER}, P3M binaries. Median of ${RUNS} runs._"
 echo ""
 echo "Methodology:"
